@@ -55,9 +55,9 @@ Swedish, Czech, Turkish, Russian, Ukrainian, Indonesian, Vietnamese, Japanese, K
 Simplified and Traditional Chinese.
 
 Each language is one file in `assets/lang/` that maps the English text to its translation.
-To fix a translation or add a language without rebuilding, put a file in
-`%LOCALAPPDATA%\rainbow\lang\` (copy `assets/lang/template.json` to start a new one; the
-file name is the language code, e.g. `pt-PT.json`). For contributors:
+To fix a translation or add a language without rebuilding, put a file in the `lang` folder
+inside Rainbow's data folder (see [Data](#data)); copy `assets/lang/template.json` to start a
+new one, and name the file after the language code, e.g. `pt-PT.json`. For contributors:
 
 - `python tools/extract_strings.py` refreshes `template.json` after code changes.
 - `python tools/check_translations.py` checks every language for missing strings and
@@ -75,8 +75,17 @@ default, Rainbow Rounded, is Doppio One by Sorkin Type with its ligature table r
 
 ## Data
 
-Settings and the catalogue live in `%LOCALAPPDATA%\rainbow`. Each songs folder gets a
-`.rainbow-downloaded.txt` list so re-runs skip charts you already have.
+Rainbow keeps its settings, chart catalogue and language overrides in each system's usual
+place, and album covers in the system's cache folder:
+
+| | Data | Cover cache |
+|---|---|---|
+| Windows | `%LOCALAPPDATA%\rainbow` | `%LOCALAPPDATA%\rainbow\covers` |
+| macOS | `~/Library/Application Support/Rainbow` | `~/Library/Caches/Rainbow/covers` |
+| Linux | `~/.local/share/rainbow` (`$XDG_DATA_HOME`) | `~/.cache/rainbow/covers` (`$XDG_CACHE_HOME`) |
+
+Each songs folder also gets a `.rainbow-downloaded.txt` list, so re-runs skip charts you
+already have.
 
 ## Be nice to Encore
 

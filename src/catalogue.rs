@@ -39,12 +39,21 @@ pub enum Progress {
     Page { page: u32, pages: u32, charts: usize, new: Vec<Chart> },
 }
 
+/// The app's folder name: capitalised on macOS, where that's the convention.
+const APP_DIR: &str = if cfg!(target_os = "macos") { "Rainbow" } else { "rainbow" };
+
+/// Where settings, the catalogue and language overrides live:
+/// Windows `%LOCALAPPDATA%/rainbow`, macOS `~/Library/Application Support/Rainbow`,
+/// Linux `$XDG_DATA_HOME/rainbow` (usually `~/.local/share/rainbow`).
 pub fn data_dir() -> PathBuf {
-    let base = std::env::var_os("LOCALAPPDATA")
-        .or_else(|| std::env::var_os("HOME"))
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."));
-    base.join("rainbow")
+    dirs::data_local_dir().unwrap_or_else(|| PathBuf::from(".")).join(APP_DIR)
+}
+
+/// Where downloaded files that can be thrown away (album covers) are kept:
+/// Windows `%LOCALAPPDATA%/rainbow`, macOS `~/Library/Caches/Rainbow`,
+/// Linux `$XDG_CACHE_HOME/rainbow` (usually `~/.cache/rainbow`).
+pub fn cache_dir() -> PathBuf {
+    dirs::cache_dir().unwrap_or_else(|| PathBuf::from(".")).join(APP_DIR)
 }
 
 pub fn path() -> PathBuf {

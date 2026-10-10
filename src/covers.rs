@@ -57,7 +57,7 @@ pub struct Covers {
 }
 
 fn cache_dir() -> PathBuf {
-    crate::catalogue::data_dir().join("covers")
+    crate::catalogue::cache_dir().join("covers")
 }
 
 impl Covers {

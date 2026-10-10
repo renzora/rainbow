@@ -6,8 +6,9 @@
 //! ```
 //!
 //! The English text is the key, so code just writes `t("Select all")`; anything missing from
-//! a language falls back to English. Files in `%LOCALAPPDATA%\rainbow\lang\` are loaded too,
-//! so translations can be fixed or added without rebuilding.
+//! a language falls back to English. Files in the `lang` folder inside the data folder (see
+//! `catalogue::data_dir`) are loaded too, so translations can be fixed or added without
+//! rebuilding.
 
 use std::collections::HashMap;
 use std::sync::RwLock;
