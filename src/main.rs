@@ -2171,10 +2171,13 @@ impl eframe::App for App {
         let ctx = ui.ctx().clone();
 
         egui::Panel::top("header").show(ui, |ui| self.header(ui));
-        egui::Panel::bottom("status").show(ui, |ui| {
-            ui.add_space(3.0);
+        let status_frame = egui::Frame::new()
+            .fill(ui.visuals().panel_fill)
+            .stroke(ui.visuals().widgets.noninteractive.bg_stroke)
+            .inner_margin(egui::Margin::symmetric(14, 8));
+        egui::Panel::bottom("status").frame(status_frame).show(ui, |ui| {
+            ui.set_min_height(24.0);
             self.status_bar(ui);
-            ui.add_space(3.0);
         });
         if self.job.is_some() {
             egui::Panel::bottom("download").show(ui, |ui| self.download_bar(ui));
