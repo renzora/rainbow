@@ -812,14 +812,6 @@ pub fn back_to_top(ui: &mut egui::Ui) -> egui::Response {
     resp
 }
 
-/// A filled button in the "good" colour (green, or the colour-blind safe equivalent),
-/// used for downloads.
-pub fn download_button(text: impl Into<String>) -> egui::Button<'static> {
-    // A little darker than the status green, so white text on it is easy to read.
-    let fill = good().lerp_to_gamma(Color32::BLACK, 0.2);
-    egui::Button::new(egui::RichText::new(text.into()).color(text_on(fill)).strong()).fill(fill)
-}
-
 /// A soft, heavily blurred copy of a screenshot, for frosted-glass backdrops. The image is
 /// shrunk first (which blurs and keeps it cheap), then box-blurred; drawing it stretched
 /// with linear filtering smooths it further.

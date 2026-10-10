@@ -1080,7 +1080,8 @@ impl App {
                 ui.add_space(12.0);
                 if let Some(job) = &self.job {
                     ui.add(crate::theme::Bar::new(job.checked as f32 / job.total.max(1) as f32).desired_width(140.0).show_percentage());
-                    ui.label(RichText::new(format!("⬇ {}", job.downloaded)).color(theme::good()));
+                    ui.label(RichText::new(job.downloaded.to_string()).color(theme::good()));
+                    ui.add(download_icon(14.0, theme::good()));
                 }
             });
         });
@@ -1814,25 +1815,28 @@ impl App {
         crate::theme::hrow(ui, |ui| {
             // Titles like "Entire Encore library" are translated (a resumed download keeps the
             // title it started with).
-            ui.strong(format!("⬇ {}", t(&job.title)));
+            ui.add(download_icon(15.0, ui.visuals().strong_text_color()));
+            ui.strong(t(&job.title));
             ui.label(tr!("{done} / {total} checked", done = job.checked, total = job.total));
             ui.colored_label(theme::good(), tr!("✔ {count} downloaded", count = job.downloaded));
             ui.weak(tr!("{count} in library", count = job.checked - job.downloaded - job.failed));
             if job.failed > 0 {
                 ui.colored_label(theme::bad(), tr!("✖ {count} failed", count = job.failed));
             }
-            // Time left: the average time per chart fetched so far, times the charts still to get
-            // (ones already downloaded are skipped in no time).
+            let stop = egui::Button::new(RichText::new(t("Stop")).color(Color32::WHITE).strong()).fill(theme::bad()).small();
+            if ui.add(stop).clicked() {
+                self.stop.store(true, Ordering::Relaxed);
+            }
+            // Time left, at the far end: the average time per chart fetched so far, times the
+            // charts still to get (ones already downloaded are skipped in no time).
             let fetched = job.downloaded + job.failed;
             let left = job.to_get.saturating_sub(fetched);
             if fetched >= 2 && left > 0 {
                 let secs = job.started.elapsed().as_secs_f64() / fetched as f64 * left as f64;
-                ui.weak(tr!("⏳ about {time} left ({count} to go)", time = duration_words(secs), count = preview::thousands(left as u64)))
-                    .on_hover_text(t("Estimated from how long each download has taken so far"));
-            }
-            let stop = egui::Button::new(RichText::new(t("Stop")).color(Color32::WHITE).strong()).fill(theme::bad()).small();
-            if ui.add(stop).clicked() {
-                self.stop.store(true, Ordering::Relaxed);
+                ui.with_layout(crate::theme::trailing(), |ui| {
+                    ui.weak(tr!("⏳ about {time} left ({count} to go)", time = duration_words(secs), count = preview::thousands(left as u64)))
+                        .on_hover_text(t("Estimated from how long each download has taken so far"));
+                });
             }
         });
         // One bar for the whole job, naming the song being downloaded (the last one stays
@@ -1866,7 +1870,7 @@ impl App {
                         if ui.small_button(t("✖ Close")).on_hover_text(t("Hide the log")).clicked() {
                             close = true;
                         }
-                        if ui.small_button(t("Copy all")).on_hover_text(t("Copy the whole log")).clicked() {
+                        if ui.small_button(format!("📋  {}", t("Copy all"))).on_hover_text(t("Copy the whole log")).clicked() {
                             ui.ctx().copy_text(log.join("\n"));
                         }
                     });
@@ -2147,9 +2151,10 @@ impl App {
         let count = self.results.len();
         let level = self.toolbar_level;
         // Shorter labels as space runs out (the tooltips always say it in full).
-        let library = if level < 2 { t("⬇ Entire library") } else { "⬇ 📚".to_owned() };
+        let library = if level < 2 { t("⬇ Entire library") } else { "📚".to_owned() };
+        let text = ui.visuals().text_color();
         let resp = ui
-            .add_enabled(!busy && self.cat_complete, egui::Button::new(library))
+            .add_enabled(!busy && self.cat_complete, icon_button(&library, text))
             .on_hover_text(t("Download every chart on Encore"))
             .on_disabled_hover_text(t("Available once the catalogue has finished downloading"));
         if resp.clicked() {
@@ -2161,7 +2166,7 @@ impl App {
             1 => t("⬇ All results"),
             _ => t("⬇ All"),
         };
-        let resp = ui.add_enabled(!busy && count > 0, egui::Button::new(all)).on_hover_text(tr!("⬇ All {count} results", count = count));
+        let resp = ui.add_enabled(!busy && count > 0, icon_button(&all, text)).on_hover_text(tr!("⬇ All {count} results", count = count));
         if resp.clicked() {
             let charts: Vec<Chart> = self.results.iter().map(|&i| self.charts[i].clone()).collect();
             self.request_download(t("All current results"), charts);
@@ -2169,7 +2174,7 @@ impl App {
         let n = self.selected.len();
         let selected = if level == 0 { tr!("⬇ Download selected ({count})", count = n) } else { tr!("⬇ Selected ({count})", count = n) };
         if ui
-            .add_enabled(!busy && n > 0, theme::download_button(selected))
+            .add_enabled(!busy && n > 0, download_button(&selected))
             .on_hover_text(tr!("⬇ Download selected ({count})", count = n))
             .clicked()
         {
@@ -2789,7 +2794,7 @@ impl App {
                         .min_size(vec2(half, 34.0));
                     reveal_it = ui.add(button).on_hover_text(t("Downloaded ✔  Open it in your file manager")).clicked();
                 } else {
-                    download = ui.add_enabled(!busy, theme::download_button(t("⬇  Download")).min_size(vec2(half, 34.0))).clicked();
+                    download = ui.add_enabled(!busy, download_button(&t("⬇  Download")).min_size(vec2(half, 34.0))).clicked();
                 }
                 open_preview = ui
                     .add(egui::Button::new(RichText::new(t("▶  Preview")).size(14.5).strong().color(Color32::WHITE)).fill(Color32::from_rgb(124, 84, 210)).min_size(vec2(half, 34.0)))
@@ -3238,7 +3243,16 @@ fn settings_card(ui: &mut egui::Ui, width: f32, title: &str, about: &str, add: i
         .show(ui, |ui| {
             ui.set_width(width - 38.0);
             crate::theme::vcol(ui, |ui| {
-                ui.label(RichText::new(title).size(19.0).strong().color(theme::accent_hover()));
+                let title_text = RichText::new(without_arrow(title)).size(19.0).strong().color(theme::accent_hover());
+                if title.starts_with('⬇') {
+                    // The drawn download icon rather than the ⬇ character.
+                    crate::theme::hrow(ui, |ui| {
+                        ui.add(download_icon(19.0, theme::accent_hover()));
+                        ui.label(title_text);
+                    });
+                } else {
+                    ui.label(title_text);
+                }
                 ui.label(RichText::new(about).size(13.5).weak());
                 ui.add_space(10.0);
                 ui.spacing_mut().item_spacing.y = 10.0;
@@ -3823,7 +3837,9 @@ fn copy_link_items(ui: &mut egui::Ui, md5: &str) {
 fn row_context_menu(ui: &mut egui::Ui, c: &Chart, i: usize, checked: bool, downloaded: bool, action: &mut Option<RowAction>) {
     ui.set_min_width(210.0);
     let mut pick = |ui: &mut egui::Ui, label: &str, a: RowAction| {
-        if ui.button(label).clicked() {
+        // The download line gets the drawn icon rather than the ⬇ character.
+        let button = if label.starts_with('⬇') { icon_button(label, ui.visuals().text_color()) } else { egui::Button::new(label) };
+        if ui.add(button).clicked() {
             *action = Some(a);
             ui.close();
         }
@@ -3962,6 +3978,28 @@ fn column_gap(headers: &[(Col, egui::Rect)], x: f32) -> Option<f32> {
 /// last level if none fits.
 fn pick_level(widths: &[f32], width: f32) -> usize {
     widths.iter().position(|&w| w == 0.0 || w <= width).unwrap_or(widths.len() - 1)
+}
+
+/// The download icon (an arrow into a tray), drawn rather than the boxy ⬇ character.
+fn download_icon(size: f32, color: Color32) -> egui::Image<'static> {
+    egui::Image::new(egui::include_image!("../assets/icons/download.svg")).fit_to_exact_size(vec2(size, size)).tint(color)
+}
+
+/// Text without a leading ⬇ (the translations have it; the icon is drawn instead).
+fn without_arrow(text: &str) -> String {
+    text.trim_start_matches('⬇').trim_start().to_owned()
+}
+
+/// A button with the download icon before its text.
+fn icon_button(text: &str, color: Color32) -> egui::Button<'static> {
+    egui::Button::image_and_text(download_icon(14.0, color), without_arrow(text))
+}
+
+/// The green download button, with the icon.
+fn download_button(text: &str) -> egui::Button<'static> {
+    let fill = theme::good().lerp_to_gamma(Color32::BLACK, 0.2);
+    let on = theme::text_on(fill);
+    egui::Button::image_and_text(download_icon(15.0, on), RichText::new(without_arrow(text)).color(on).strong()).fill(fill)
 }
 
 /// A place in the app for Back and Forward: a tab, the search, and the player profile shown.
