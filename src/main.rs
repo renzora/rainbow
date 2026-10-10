@@ -993,6 +993,9 @@ impl App {
             .order(egui::Order::Foreground)
             .fixed_pos(egui::pos2(screen.left(), self.search_bottom))
             .show(ctx, |ui| {
+                // An Area's room is last frame's size; let it grow so the cards never get
+                // clipped into a scroll area they don't need.
+                ui.set_max_height(screen.bottom() - self.search_bottom);
                 // Full width, flush under the search bar, like a drop-down sheet.
                 let frame = egui::Frame::new()
                     .fill(ui.visuals().panel_fill)
@@ -1014,7 +1017,11 @@ impl App {
                         });
                     });
                     ui.add_space(6.0);
-                    egui::ScrollArea::vertical().max_height(max_height).auto_shrink([false, true]).show(ui, |ui| {
+                    egui::ScrollArea::vertical()
+                        .max_height(max_height)
+                        .auto_shrink([false, true])
+                        .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded)
+                        .show(ui, |ui| {
                         self.advanced_search(ui);
                     });
                 });
@@ -1029,22 +1036,35 @@ impl App {
         let card_w = (avail - GAP * (columns - 1) as f32) / columns as f32;
         let mut lookup = false;
         let sections = [Section::Text, Section::Ranges, Section::Chart, Section::Features];
-        for row in sections.chunks(columns) {
+        for (r, row) in sections.chunks(columns).enumerate() {
+            if r > 0 {
+                ui.add_space(GAP);
+            }
+            // Cards in a row share the height of the tallest one (measured last frame).
+            let id = ui.id().with(("adv_row", columns, r));
+            let row_h = ui.data(|d| d.get_temp::<f32>(id)).unwrap_or(0.0);
+            let mut tallest: f32 = 0.0;
             ui.horizontal_top(|ui| {
                 ui.spacing_mut().item_spacing.x = GAP;
                 for section in row {
-                    lookup |= self.advanced_card(ui, *section, card_w);
+                    let (wants_lookup, h) = self.advanced_card(ui, *section, card_w, row_h);
+                    lookup |= wants_lookup;
+                    tallest = tallest.max(h);
                 }
             });
-            ui.add_space(GAP);
+            if (tallest - row_h).abs() > 0.5 {
+                ui.data_mut(|d| d.insert_temp(id, tallest));
+                ui.ctx().request_repaint();
+            }
         }
         if lookup && !self.track_lookup {
             self.lookup_track_hash();
         }
     }
 
-    /// One advanced-search card. Returns true if a track hash lookup was requested.
-    fn advanced_card(&mut self, ui: &mut egui::Ui, section: Section, width: f32) -> bool {
+    /// One advanced-search card, at least `min_height` tall. Returns whether a track hash
+    /// lookup was requested, and the height its contents need.
+    fn advanced_card(&mut self, ui: &mut egui::Ui, section: Section, width: f32, min_height: f32) -> (bool, f32) {
         let mut lookup = false;
         let track_lookup = self.track_lookup;
         let f = &mut self.filters;
@@ -1055,14 +1075,14 @@ impl App {
             Section::Chart => n("🔑  Chart"),
             Section::Features => n("✨  Features"),
         };
-        egui::Frame::new()
+        let height = egui::Frame::new()
             .fill(ui.visuals().faint_bg_color)
             .stroke(ui.visuals().widgets.noninteractive.bg_stroke)
             .corner_radius(CornerRadius::same(10))
             .inner_margin(egui::Margin::same(12))
             .show(ui, |ui| {
                 ui.set_width(inner);
-                ui.vertical(|ui| {
+                let natural = ui.vertical(|ui| {
                     ui.label(RichText::new(t(title)).strong().color(theme::accent_hover()));
                     ui.add_space(6.0);
                     match section {
@@ -1173,9 +1193,14 @@ impl App {
                             });
                         }
                     }
+                    ui.min_rect().height()
                 });
-            });
-        lookup
+                let natural = natural.inner;
+                ui.set_min_height(min_height.max(natural));
+                natural
+            })
+            .inner;
+        (lookup, height)
     }
 
     /// The fixed status bar at the bottom: catalogue progress, rate-limit notices, the log
@@ -1956,15 +1981,17 @@ impl App {
             return;
         };
         let downloaded = self.manifest.lock().unwrap().contains(&c.md5);
-        fancy_scroll(ui, "detail", |ui| {
-            ui.add_space(8.0);
-            ui.horizontal(|ui| {
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
-                    if ui.small_button("✖").on_hover_text(t("Close")).clicked() {
-                        self.detail = None;
-                    }
-                });
+        // The close button stays put above the scrolling details.
+        ui.add_space(8.0);
+        ui.horizontal(|ui| {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.small_button("✖").on_hover_text(t("Close")).clicked() {
+                    self.detail = None;
+                }
             });
+        });
+        ui.add_space(4.0);
+        fancy_scroll(ui, "detail", |ui| {
             let size = ui.available_width().min(320.0);
             ui.vertical_centered(|ui| cover(ui, &mut self.covers, c.art.as_deref(), size, covers::LARGE));
             ui.add_space(8.0);
