@@ -1,5 +1,4 @@
-//! Automatic extraction of .zip files dropped into the songs folder (e.g. charts downloaded
-//! from other sites), so Clone Hero can see them.
+//! Safe .zip extraction for charts downloaded from other sites, so Clone Hero can see them.
 
 use std::fs::{self, File};
 use std::io;
@@ -11,36 +10,15 @@ use anyhow::{Context, Result};
 /// Where extracted zips are moved when they aren't deleted.
 pub const DONE_DIR: &str = ".rainbow-extracted-zips";
 
-/// Extracts every finished .zip at the top level of `dir`. Returns a log line per archive.
-pub fn extract_all(dir: &Path, delete: bool) -> Vec<String> {
-    let Ok(entries) = fs::read_dir(dir) else {
-        return Vec::new();
-    };
-    let mut log = Vec::new();
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let is_zip = path.extension().is_some_and(|e| e.eq_ignore_ascii_case("zip"));
-        if !is_zip || !path.is_file() || !settled(&path) {
-            continue;
-        }
-        let name = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
-        match extract(&path, dir).and_then(|dest| finish(&path, dir, delete).map(|()| dest)) {
-            Ok(dest) => log.push(format!("Extracted {name} to {}", dest.display())),
-            Err(e) => log.push(format!("Couldn't extract {name}: {e:#}")),
-        }
-    }
-    log
-}
-
 /// Skip files modified in the last few seconds; they may still be downloading.
-fn settled(path: &Path) -> bool {
+pub fn settled(path: &Path) -> bool {
     let modified = fs::metadata(path).and_then(|m| m.modified()).unwrap_or(SystemTime::now());
     SystemTime::now().duration_since(modified).unwrap_or_default() > Duration::from_secs(5)
 }
 
 /// Extracts into `<dir>/<zip name>/`. If everything in the zip is inside one folder, that
 /// folder's contents go there directly instead of being nested a level deeper.
-fn extract(zip_path: &Path, dir: &Path) -> Result<PathBuf> {
+pub fn extract(zip_path: &Path, dir: &Path) -> Result<PathBuf> {
     let mut archive = zip::ZipArchive::new(File::open(zip_path)?).context("not a valid zip file")?;
 
     // Safe relative paths only (no "..", no absolute paths).
@@ -89,22 +67,23 @@ fn extract(zip_path: &Path, dir: &Path) -> Result<PathBuf> {
     Ok(dest)
 }
 
-/// Deletes the zip, or moves it out of the way so it isn't extracted again.
-fn finish(zip_path: &Path, dir: &Path, delete: bool) -> Result<()> {
+/// Deletes a processed file, or moves it into `<dir>/<subdir>/` so it isn't processed again.
+pub fn set_aside(path: &Path, dir: &Path, subdir: &str, delete: bool) -> Result<()> {
     if delete {
-        fs::remove_file(zip_path)?;
-    } else {
-        let done = dir.join(DONE_DIR);
-        fs::create_dir_all(&done)?;
-        let name = zip_path.file_name().unwrap_or_default();
-        let mut target = done.join(name);
-        let mut n = 2;
-        while target.exists() {
-            target = done.join(format!("{} ({n}).zip", zip_path.file_stem().unwrap_or_default().to_string_lossy()));
-            n += 1;
-        }
-        fs::rename(zip_path, target)?;
+        fs::remove_file(path)?;
+        return Ok(());
     }
+    let done = dir.join(subdir);
+    fs::create_dir_all(&done)?;
+    let stem = path.file_stem().unwrap_or_default().to_string_lossy().into_owned();
+    let ext = path.extension().map(|e| format!(".{}", e.to_string_lossy())).unwrap_or_default();
+    let mut target = done.join(format!("{stem}{ext}"));
+    let mut n = 2;
+    while target.exists() {
+        target = done.join(format!("{stem} ({n}){ext}"));
+        n += 1;
+    }
+    fs::rename(path, target)?;
     Ok(())
 }
 

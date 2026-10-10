@@ -33,10 +33,47 @@ impl<'a> Reader<'a> {
     }
 }
 
+/// The .sng's song.ini text and its files' masks and (name, offset, length).
+struct Contents {
+    ini: String,
+    mask: [u8; 16],
+    files: Vec<(String, usize, usize)>,
+}
+
+impl Contents {
+    fn data(&self, data: &[u8], offset: usize, len: usize) -> Result<Vec<u8>> {
+        let end = offset.checked_add(len).filter(|&e| e <= data.len()).context("truncated .sng file data")?;
+        Ok(data[offset..end].iter().enumerate().map(|(i, b)| b ^ (self.mask[i % 16] ^ (i % 256) as u8)).collect())
+    }
+}
+
+/// The song.ini text, and the first file in the .sng whose (lowercase) name is in `names`.
+pub fn read_file(data: &[u8], names: &[&str]) -> Result<(String, Option<(String, Vec<u8>)>)> {
+    let c = contents(data)?;
+    for want in names {
+        if let Some((name, offset, len)) = c.files.iter().find(|f| f.0.eq_ignore_ascii_case(want)) {
+            return Ok((c.ini.clone(), Some((name.to_lowercase(), c.data(data, *offset, *len)?))));
+        }
+    }
+    Ok((c.ini, None))
+}
+
 /// Extracts `sng_path` into the directory `out_dir` (created if needed).
 pub fn extract(sng_path: &Path, out_dir: &Path) -> Result<()> {
     let data = fs::read(sng_path)?;
-    let mut r = Reader { buf: &data, pos: 0 };
+    let c = contents(&data)?;
+    fs::create_dir_all(out_dir)?;
+    fs::write(out_dir.join("song.ini"), &c.ini)?;
+    for (name, offset, len) in &c.files {
+        // File names come from the download; never let them escape the chart folder.
+        let name = Path::new(name).file_name().context("bad file name in .sng")?.to_owned();
+        fs::write(out_dir.join(name), c.data(&data, *offset, *len)?)?;
+    }
+    Ok(())
+}
+
+fn contents(data: &[u8]) -> Result<Contents> {
+    let mut r = Reader { buf: data, pos: 0 };
     if r.take(6)? != b"SNGPKG" {
         bail!("not a .sng file");
     }
@@ -62,21 +99,7 @@ pub fn extract(sng_path: &Path, out_dir: &Path) -> Result<()> {
         let offset = r.u64()? as usize;
         files.push((name, offset, len));
     }
-
-    fs::create_dir_all(out_dir)?;
-    fs::write(out_dir.join("song.ini"), ini)?;
-    for (name, offset, len) in files {
-        // File names come from the download; never let them escape the chart folder.
-        let name = Path::new(&name).file_name().context("bad file name in .sng")?.to_owned();
-        let end = offset.checked_add(len).filter(|&e| e <= data.len()).context("truncated .sng file data")?;
-        let unmasked: Vec<u8> = data[offset..end]
-            .iter()
-            .enumerate()
-            .map(|(i, b)| b ^ (mask[i % 16] ^ (i % 256) as u8))
-            .collect();
-        fs::write(out_dir.join(name), unmasked)?;
-    }
-    Ok(())
+    Ok(Contents { ini, mask, files })
 }
 
 #[cfg(test)]

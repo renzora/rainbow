@@ -412,6 +412,13 @@ impl Client {
         Ok(md5s)
     }
 
+    /// Downloads a chart's .sng into memory (the no-video version, when there is one).
+    pub fn fetch_sng(&self, chart: &Chart) -> Result<Vec<u8>> {
+        let novideo = if chart.has(flag::VIDEO) { "_novideo" } else { "" };
+        let url = format!("{FILES_URL}/{}{novideo}.sng", chart.md5);
+        self.retry(|| Ok(self.check(self.http.get(&url).send()?)?.bytes()?.to_vec()))
+    }
+
     /// Downloads a chart into `settings.dir` (as a .sng file or an extracted chart folder,
     /// named by `settings.folder_name`) and returns the path.
     /// `progress` is called with (bytes so far, total bytes if known).

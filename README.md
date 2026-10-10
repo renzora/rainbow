@@ -25,6 +25,17 @@ A fast desktop app for searching and downloading Clone Hero / YARG charts from
 - **Bulk downloads** of selected charts, every search result, or the entire library, with
   progress, stop/resume (already-downloaded charts are skipped), and a polite delay between
   downloads.
+- **Rock Band song conversion** (no Nautilus needed): drop Rock Band CON files (e.g. from
+  RhythmVerse) onto the window, or put them in your songs folder, and Rainbow turns them into
+  Clone Hero charts: `song.ini` from `songs.dta`, `notes.mid`, `album.png`, and the multitrack
+  audio split into per-instrument Ogg Vorbis stems. Encrypted official DLC can't be converted.
+- **Chart preview**: watch any chart's notes fall down a highway before downloading it.
+- **Automatic .zip extraction** for charts downloaded from other sites.
+- **Accessibility**: a choice of fonts (including Atkinson Hyperlegible, Lexend and
+  OpenDyslexic), colour-blind safe colours, a high-contrast theme, reduce motion, full
+  keyboard control (press F1 for the list) and screen reader support through AccessKit.
+- Clickable artists, albums, charters, games, difficulties and more, a Legacy filter for the
+  official Guitar Hero / Rock Band charts, album art, and several colour themes.
 - Respects Encore's API rate limits automatically.
 
 ## Building
@@ -35,6 +46,11 @@ Requires Rust (stable). On Windows the icon is embedded into the `.exe`.
 cargo build --release
 # target/release/rainbow(.exe)
 ```
+
+## Fonts
+
+Rainbow bundles its fonts, all under the SIL Open Font License (see `assets/fonts`). The
+default, Rainbow Rounded, is Doppio One by Sorkin Type with its ligature table removed.
 
 ## Data
 

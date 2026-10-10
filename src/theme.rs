@@ -5,9 +5,143 @@ use std::sync::RwLock;
 use eframe::egui::{self, Color32, CornerRadius, FontId, Stroke, TextStyle, Visuals};
 use serde::{Deserialize, Serialize};
 
-pub const GREEN: Color32 = Color32::from_rgb(74, 201, 120);
-pub const RED: Color32 = Color32::from_rgb(235, 96, 96);
-pub const AMBER: Color32 = Color32::from_rgb(240, 180, 70);
+const GREEN: Color32 = Color32::from_rgb(74, 201, 120);
+const RED: Color32 = Color32::from_rgb(235, 96, 96);
+const AMBER: Color32 = Color32::from_rgb(240, 180, 70);
+
+/// Colour-vision modes. They swap the status and difficulty colours for ones that stay
+/// distinguishable (based on the Okabe-Ito palette); icons and numbers carry the meaning too.
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Debug, Default)]
+pub enum ColorBlind {
+    #[default]
+    Off,
+    /// Protanopia / deuteranopia (the common red-green kinds).
+    RedGreen,
+    /// Tritanopia.
+    BlueYellow,
+}
+
+impl ColorBlind {
+    pub const ALL: [ColorBlind; 3] = [ColorBlind::Off, ColorBlind::RedGreen, ColorBlind::BlueYellow];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            ColorBlind::Off => "Off",
+            ColorBlind::RedGreen => "Red-green",
+            ColorBlind::BlueYellow => "Blue-yellow",
+        }
+    }
+}
+
+static COLOR_MODE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+fn color_mode() -> ColorBlind {
+    match COLOR_MODE.load(std::sync::atomic::Ordering::Relaxed) {
+        1 => ColorBlind::RedGreen,
+        2 => ColorBlind::BlueYellow,
+        _ => ColorBlind::Off,
+    }
+}
+
+/// "Good" status colour (downloaded, must-have).
+pub fn good() -> Color32 {
+    match color_mode() {
+        ColorBlind::Off => GREEN,
+        ColorBlind::RedGreen => rgb(86, 180, 233),
+        ColorBlind::BlueYellow => rgb(42, 183, 202),
+    }
+}
+
+/// "Bad" status colour (broken, failed, must-not-have).
+pub fn bad() -> Color32 {
+    match color_mode() {
+        ColorBlind::Off => RED,
+        ColorBlind::RedGreen => rgb(230, 159, 0),
+        ColorBlind::BlueYellow => rgb(232, 80, 91),
+    }
+}
+
+/// Warning colour (chart issues, official games, notices).
+pub fn warn() -> Color32 {
+    match color_mode() {
+        ColorBlind::Off => AMBER,
+        ColorBlind::RedGreen => rgb(240, 228, 66),
+        ColorBlind::BlueYellow => rgb(242, 167, 195),
+    }
+}
+
+/// Colour for a difficulty (0 easy .. 6 hardest).
+pub fn difficulty_color(d: i8) -> Color32 {
+    let i = d.clamp(0, 6) as usize;
+    match color_mode() {
+        ColorBlind::Off => RAINBOW[[3, 3, 2, 2, 1, 0, 0][i]],
+        ColorBlind::RedGreen => [rgb(86, 180, 233), rgb(86, 180, 233), rgb(240, 228, 66), rgb(240, 228, 66), rgb(230, 159, 0), rgb(213, 94, 0), rgb(213, 94, 0)][i],
+        ColorBlind::BlueYellow => [rgb(127, 211, 224), rgb(127, 211, 224), rgb(242, 167, 195), rgb(242, 167, 195), rgb(232, 80, 91), rgb(179, 0, 27), rgb(179, 0, 27)][i],
+    }
+}
+
+/// Text colour that reads well on the accent colour (black on bright accents).
+pub fn on_accent() -> Color32 {
+    let a = accent();
+    let luma = 0.299 * a.r() as f32 + 0.587 * a.g() as f32 + 0.114 * a.b() as f32;
+    if luma > 160.0 { Color32::BLACK } else { Color32::WHITE }
+}
+
+/// Settings that affect the look beyond the colour theme.
+#[derive(Clone, Copy)]
+pub struct Access {
+    pub color_blind: ColorBlind,
+    pub reduce_motion: bool,
+}
+
+/// Interface fonts, all bundled (SIL Open Font License).
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Debug, Default)]
+pub enum UiFont {
+    /// Rainbow's default: a rounded, friendly face based on Doppio One.
+    #[default]
+    Rounded,
+    NotoSans,
+    /// Designed for low-vision readers.
+    Atkinson,
+    /// Designed to reduce visual stress and improve reading speed.
+    Lexend,
+    /// Weighted letter shapes that some dyslexic readers find easier.
+    OpenDyslexic,
+}
+
+impl UiFont {
+    pub const ALL: [UiFont; 5] = [UiFont::Rounded, UiFont::NotoSans, UiFont::Atkinson, UiFont::Lexend, UiFont::OpenDyslexic];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            UiFont::Rounded => "Rainbow Rounded",
+            UiFont::NotoSans => "Noto Sans",
+            UiFont::Atkinson => "Atkinson Hyperlegible",
+            UiFont::Lexend => "Lexend",
+            UiFont::OpenDyslexic => "OpenDyslexic",
+        }
+    }
+
+    pub fn about(self) -> &'static str {
+        match self {
+            UiFont::Rounded => "The default. Based on Doppio One by Sorkin Type.",
+            UiFont::NotoSans => "Plain and neutral.",
+            UiFont::Atkinson => "Made for low-vision readers: very distinct letters.",
+            UiFont::Lexend => "Wider spacing to reduce visual stress.",
+            UiFont::OpenDyslexic => "Heavier letter bottoms some dyslexic readers find easier.",
+        }
+    }
+
+    pub fn key(self) -> &'static str {
+        match self {
+            UiFont::Rounded => "rainbow-rounded",
+            UiFont::NotoSans => "noto-sans",
+            UiFont::Atkinson => "atkinson",
+            UiFont::Lexend => "lexend",
+            UiFont::OpenDyslexic => "opendyslexic",
+        }
+    }
+}
 
 /// The logo's colours, for the title and difficulty dots.
 pub const RAINBOW: [Color32; 7] = [
@@ -30,6 +164,7 @@ pub enum ThemeKind {
     Ocean,
     Forest,
     Sunset,
+    HighContrast,
 }
 
 #[derive(Clone, Copy)]
@@ -66,7 +201,7 @@ const MIDNIGHT: Palette = Palette {
 };
 
 impl ThemeKind {
-    pub const ALL: [ThemeKind; 7] = [
+    pub const ALL: [ThemeKind; 8] = [
         ThemeKind::Midnight,
         ThemeKind::Daylight,
         ThemeKind::Hotel,
@@ -74,6 +209,7 @@ impl ThemeKind {
         ThemeKind::Ocean,
         ThemeKind::Forest,
         ThemeKind::Sunset,
+        ThemeKind::HighContrast,
     ];
 
     pub fn name(self) -> &'static str {
@@ -85,6 +221,7 @@ impl ThemeKind {
             ThemeKind::Ocean => "Ocean",
             ThemeKind::Forest => "Forest",
             ThemeKind::Sunset => "Sunset",
+            ThemeKind::HighContrast => "High contrast",
         }
     }
 
@@ -113,6 +250,8 @@ impl ThemeKind {
             ThemeKind::Synthwave => p(true, rgb(28, 16, 44), rgb(34, 20, 54), rgb(48, 28, 76), rgb(18, 10, 30), rgb(66, 38, 104), rgb(84, 48, 130), rgb(246, 234, 255), rgb(176, 150, 206), rgb(255, 62, 165), rgb(255, 110, 192)),
             ThemeKind::Ocean => p(true, rgb(14, 30, 46), rgb(17, 36, 55), rgb(24, 48, 72), rgb(8, 20, 32), rgb(32, 64, 94), rgb(42, 80, 116), rgb(226, 240, 248), rgb(130, 160, 182), rgb(34, 184, 207), rgb(72, 206, 226)),
             ThemeKind::Forest => p(true, rgb(18, 30, 22), rgb(22, 36, 27), rgb(30, 50, 37), rgb(10, 20, 14), rgb(40, 66, 49), rgb(52, 84, 63), rgb(228, 240, 230), rgb(138, 166, 146), rgb(76, 195, 107), rgb(108, 214, 136)),
+            // Pure black and white with a bright yellow accent, for low vision.
+            ThemeKind::HighContrast => p(true, rgb(0, 0, 0), rgb(10, 10, 10), rgb(32, 32, 32), rgb(0, 0, 0), rgb(60, 60, 60), rgb(85, 85, 85), rgb(255, 255, 255), rgb(215, 215, 215), rgb(255, 214, 0), rgb(255, 230, 90)),
             ThemeKind::Sunset => p(true, rgb(34, 22, 22), rgb(40, 26, 26), rgb(58, 36, 34), rgb(22, 14, 14), rgb(76, 46, 42), rgb(96, 58, 52), rgb(250, 236, 228), rgb(186, 152, 140), rgb(255, 138, 61), rgb(255, 166, 98)),
         }
     }
@@ -133,13 +272,20 @@ pub fn accent_hover() -> Color32 {
     palette().accent_hover
 }
 
-pub fn apply(ctx: &egui::Context, kind: ThemeKind, zoom: f32) {
+pub fn apply(ctx: &egui::Context, kind: ThemeKind, zoom: f32, access: Access) {
     let pal = kind.palette();
     *CURRENT.write().unwrap() = pal;
+    COLOR_MODE.store(access.color_blind as u8, std::sync::atomic::Ordering::Relaxed);
     let theme = if pal.dark { egui::Theme::Dark } else { egui::Theme::Light };
     ctx.set_theme(theme);
     ctx.set_zoom_factor(zoom);
-    ctx.style_mut_of(theme, |s| style(s, &pal));
+    ctx.style_mut_of(theme, |s| {
+        style(s, &pal);
+        if access.reduce_motion {
+            s.animation_time = 0.0;
+            s.scroll_animation = egui::style::ScrollAnimation::none();
+        }
+    });
 }
 
 fn style(style: &mut egui::Style, pal: &Palette) {
@@ -234,6 +380,7 @@ pub fn scrollbar(ui: &mut egui::Ui, track: egui::Rect, id: egui::Id, offset: f32
     let thumb = egui::Rect::from_min_size(pos2(inner.left(), top), vec2(inner.width(), thumb_h));
 
     let resp = ui.interact(track, id, egui::Sense::click_and_drag());
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Slider, true, "Scroll bar"));
     let grab_id = id.with("grab");
     let mut new_offset = None;
     if let Some(p) = resp.interact_pointer_pos() {
@@ -290,18 +437,15 @@ pub fn scrollbar(ui: &mut egui::Ui, track: egui::Rect, id: egui::Id, offset: f32
 
 /// A filled accent button for primary actions.
 pub fn primary(text: impl Into<String>) -> egui::Button<'static> {
-    egui::Button::new(egui::RichText::new(text.into()).color(Color32::WHITE).strong()).fill(accent())
+    egui::Button::new(egui::RichText::new(text.into()).color(on_accent()).strong()).fill(accent())
 }
 
-/// "Rainbow" with each letter in a logo colour.
+/// "Rainbow" with each letter in a logo colour, in the bold face.
 pub fn title(size: f32) -> egui::text::LayoutJob {
     let mut job = egui::text::LayoutJob::default();
+    let font = FontId::new(size, egui::FontFamily::Name("bold".into()));
     for (ch, color) in "RAINBOW".chars().zip(RAINBOW) {
-        job.append(
-            &ch.to_string(),
-            0.0,
-            egui::TextFormat { font_id: FontId::proportional(size), color, extra_letter_spacing: 1.5, ..Default::default() },
-        );
+        job.append(&ch.to_string(), 0.0, egui::TextFormat { font_id: font.clone(), color, ..Default::default() });
     }
     job
 }
@@ -311,6 +455,7 @@ pub fn chip(ui: &mut egui::Ui, text: &str, color: Color32) -> egui::Response {
     let galley = ui.painter().layout_no_wrap(text.to_owned(), FontId::proportional(11.5), color);
     let pad = egui::vec2(8.0, 3.0);
     let (rect, resp) = ui.allocate_exact_size(galley.size() + pad * 2.0, egui::Sense::click());
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, text));
     let painter = ui.painter();
     painter.rect(
         rect,
@@ -326,23 +471,41 @@ pub fn chip(ui: &mut egui::Ui, text: &str, color: Color32) -> egui::Response {
 /// Uses the bundled Noto fonts (assets/fonts, SIL Open Font License) on every OS: Noto Sans
 /// for the UI, with Noto Emoji for icons and Noto Sans JP for Japanese/Chinese chart names.
 /// egui's own fonts stay in the list as a fallback for its UI symbols.
-pub fn install_fonts(ctx: &egui::Context) {
+pub fn install_fonts(ctx: &egui::Context, choice: UiFont) {
     use std::sync::Arc;
     use egui::{FontData, FontFamily};
 
     let mut fonts = egui::FontDefinitions::default();
-    let mut add = |name: &str, bytes: &'static [u8]| {
+    for (name, bytes) in [
+        ("noto-sans", &include_bytes!("../assets/fonts/NotoSans.ttf")[..]),
+        ("noto-sans-bold", &include_bytes!("../assets/fonts/NotoSans-Bold.ttf")[..]),
+        ("noto-emoji", &include_bytes!("../assets/fonts/NotoEmoji.ttf")[..]),
+        ("noto-sans-jp", &include_bytes!("../assets/fonts/NotoSansJP.ttf")[..]),
+        ("rainbow-rounded", &include_bytes!("../assets/fonts/RainbowRounded.ttf")[..]),
+        ("atkinson", &include_bytes!("../assets/fonts/AtkinsonHyperlegible.ttf")[..]),
+        ("lexend", &include_bytes!("../assets/fonts/Lexend.ttf")[..]),
+        ("opendyslexic", &include_bytes!("../assets/fonts/OpenDyslexic.otf")[..]),
+    ] {
         fonts.font_data.insert(name.to_owned(), Arc::new(FontData::from_static(bytes)));
-    };
-    add("noto-sans", include_bytes!("../assets/fonts/NotoSans.ttf"));
-    add("noto-emoji", include_bytes!("../assets/fonts/NotoEmoji.ttf"));
-    add("noto-sans-jp", include_bytes!("../assets/fonts/NotoSansJP.ttf"));
+    }
+    let fallbacks = ["noto-sans", "noto-emoji", "noto-sans-jp"].map(str::to_owned);
 
+    // The chosen face first; Noto covers anything it lacks, then egui's own symbol fonts.
     let proportional = fonts.families.entry(FontFamily::Proportional).or_default();
-    proportional.insert(0, "noto-sans".to_owned());
-    proportional.extend(["noto-emoji".to_owned(), "noto-sans-jp".to_owned()]);
-    let monospace = fonts.families.entry(FontFamily::Monospace).or_default();
-    monospace.extend(["noto-sans".to_owned(), "noto-emoji".to_owned(), "noto-sans-jp".to_owned()]);
+    let mut order = vec![choice.key().to_owned()];
+    order.extend(fallbacks.iter().filter(|f| f.as_str() != choice.key()).cloned());
+    for (k, name) in order.into_iter().enumerate() {
+        proportional.insert(k, name);
+    }
+    fonts.families.entry(FontFamily::Monospace).or_default().extend(fallbacks.iter().cloned());
+    for face in UiFont::ALL {
+        let mut family = vec![face.key().to_owned()];
+        family.extend(fallbacks.iter().cloned());
+        fonts.families.insert(FontFamily::Name(face.key().into()), family);
+    }
+    let mut bold = vec!["noto-sans-bold".to_owned()];
+    bold.extend(fallbacks.iter().cloned());
+    fonts.families.insert(FontFamily::Name("bold".into()), bold);
     ctx.set_fonts(fonts);
 }
 
@@ -350,7 +513,7 @@ pub fn install_fonts(ctx: &egui::Context) {
 pub fn difficulty_dots(d: i8) -> egui::text::LayoutJob {
     let mut job = egui::text::LayoutJob::default();
     // Easy = green through hard = red.
-    let filled = RAINBOW[[3, 3, 2, 2, 1, 0, 0][d.clamp(0, 6) as usize]];
+    let filled = difficulty_color(d);
     for k in 0..6 {
         let color = if (k as i8) < d { filled } else { Color32::from_gray(80) };
         job.append("●", 0.0, egui::TextFormat { font_id: FontId::proportional(12.0), color, ..Default::default() });
@@ -376,6 +539,8 @@ pub fn checkbox_ex(ui: &mut egui::Ui, checked: &mut bool, text: &str, indetermin
         *checked = !*checked;
         resp.mark_changed();
     }
+    let (state, enabled) = (*checked, ui.is_enabled());
+    resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Checkbox, enabled, state, text));
     if !ui.is_rect_visible(rect) {
         return resp;
     }
@@ -413,6 +578,7 @@ pub fn back_to_top(ui: &mut egui::Ui) -> egui::Response {
     let (pad, arrow_w, gap, height) = (18.0, 12.0, 8.0, 38.0);
     let size = egui::vec2(pad * 2.0 + arrow_w + gap + galley.size().x, height);
     let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::click());
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Back to top"));
     let painter = ui.painter();
     let radius = CornerRadius::same((height / 2.0) as u8);
     painter.add(ui.visuals().popup_shadow.as_shape(rect, radius));

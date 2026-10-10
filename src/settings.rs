@@ -79,8 +79,16 @@ pub struct Settings {
     pub refresh_after_hours: Option<u32>,
     /// Unpack .zip files that appear in the songs folder.
     pub auto_extract: bool,
-    /// Delete zips after extracting (otherwise they're moved aside).
+    /// Delete zips and CON files after processing (otherwise they're moved aside).
     pub delete_zips: bool,
+    /// Convert Rock Band CON packages that appear in the songs folder.
+    pub auto_convert: bool,
+    /// Interface font.
+    pub font: crate::theme::UiFont,
+    /// Colour-vision mode for status and difficulty colours.
+    pub color_blind: crate::theme::ColorBlind,
+    /// Turn off animations.
+    pub reduce_motion: bool,
     /// Cover size in the results table, in points (drag the cover column to change it).
     pub cover_size: f32,
 }
@@ -99,8 +107,12 @@ impl Default for Settings {
             delay_secs: 2.0,
             refresh_after_hours: Some(12),
             cover_size: 42.0,
+            font: crate::theme::UiFont::default(),
+            color_blind: crate::theme::ColorBlind::Off,
+            reduce_motion: false,
             auto_extract: false,
             delete_zips: false,
+            auto_convert: true,
         }
     }
 }
@@ -110,6 +122,10 @@ fn path() -> PathBuf {
 }
 
 impl Settings {
+    pub fn access(&self) -> crate::theme::Access {
+        crate::theme::Access { color_blind: self.color_blind, reduce_motion: self.reduce_motion }
+    }
+
     pub fn load() -> Self {
         fs::read(path()).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
     }
