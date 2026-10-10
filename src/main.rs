@@ -1986,10 +1986,10 @@ impl App {
             let size = ui.available_width().min(320.0);
             let art = ui.vertical_centered(|ui| cover(ui, &mut self.covers, c.art.as_deref(), size, covers::LARGE)).inner;
             // Close button floating in the cover's top-right corner.
-            let label = RichText::new(t("✖  Close panel")).color(Color32::WHITE);
+            let label = RichText::new(t("✖  Close")).color(Color32::WHITE);
             let text = egui::WidgetText::from(label.clone()).into_galley(ui, Some(egui::TextWrapMode::Extend), f32::INFINITY, egui::TextStyle::Button);
             let button_size = text.size() + 2.0 * ui.spacing().button_padding;
-            let corner = art.right_top() + vec2(-8.0, 8.0);
+            let corner = art.right_top() + vec2(-4.0, 4.0);
             let close = egui::Button::new(label).fill(Color32::from_black_alpha(170)).corner_radius(CornerRadius::same(8));
             if ui.place(egui::Rect::from_min_size(corner - vec2(button_size.x, 0.0), button_size), close).on_hover_text(t("Hide the song details")).clicked() {
                 self.detail = None;
@@ -3030,7 +3030,7 @@ impl eframe::App for App {
                     w.active.fg_stroke = w.active.bg_stroke;
                     w.active.fg_stroke.width = 4.0;
                     ui.style_mut().interaction.resize_grab_radius_side = 7.0;
-                    egui::Panel::right("detail").resizable(true).default_size(340.0).size_range(260.0..=640.0).show(ui, |ui| {
+                    egui::Panel::right("detail").resizable(true).default_size(280.0).size_range(260.0..=640.0).show(ui, |ui| {
                         ui.set_style(normal.clone());
                         self.detail_panel(ui);
                     });

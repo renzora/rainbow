@@ -6,6 +6,8 @@ A fast desktop app for searching and downloading Clone Hero / YARG charts from
 [Chorus Encore](https://www.enchor.us). It's a lightweight alternative to
 [Bridge](https://github.com/Geomitron/Bridge), written in Rust.
 
+![Rainbow's search window, listing charts with their artist, album, genre, year, charter, length, difficulty and tags](assets/preview.png)
+
 ## Features
 
 - **Instant search** across Encore's whole library (~95k charts). Rainbow keeps a local
