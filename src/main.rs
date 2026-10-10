@@ -1071,7 +1071,8 @@ impl App {
         }
         ui.add_space(4.0);
 
-        let cols = self.columns(ui.available_width());
+        let table_width = ui.available_width();
+        let cols = self.columns(table_width);
         let widths: Vec<f32> = cols.iter().map(|&c| self.column_width(c)).collect();
         let manifest = self.manifest.lock().unwrap();
         let mut click = None;
@@ -1112,12 +1113,18 @@ impl App {
         if std::mem::take(&mut self.scroll_to_top) {
             table = table.scroll_to_row(0, None);
         }
-        for (&col, &w) in cols.iter().zip(&widths) {
+        // Name starts wide enough to fill the window. The last column takes up whatever is left
+        // and has no resize handle: a filler column further left would move the columns being
+        // dragged, and a handle at the window edge would fight with resizing the window.
+        let others: f32 = cols.iter().zip(&widths).filter(|(c, _)| **c != Col::Name).map(|(_, w)| w + 8.0).sum();
+        let name_w = (table_width - others - 8.0).max(widths[cols.iter().position(|c| *c == Col::Name).unwrap_or(0)]);
+        let last = cols.len() - 1;
+        for (k, (&col, &w)) in cols.iter().zip(&widths).enumerate() {
             table = table.column(match col {
                 Col::Check => Column::exact(w),
+                _ if k == last => Column::remainder().at_least(w.min(120.0)).clip(true),
                 Col::Cover => Column::initial(w).range(32.0..=250.0),
-                // Not user-resizable, so it keeps stretching to fill the width as the window changes.
-                Col::Name => Column::remainder().at_least(140.0).clip(true).resizable(false),
+                Col::Name => Column::initial(name_w).at_least(140.0).clip(true),
                 _ => Column::initial(w).at_least(40.0).clip(true),
             });
         }
