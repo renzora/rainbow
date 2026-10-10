@@ -2334,15 +2334,30 @@ fn settings_card(ui: &mut egui::Ui, width: f32, title: &str, about: &str, add: i
 /// One setting: a label and description on the left, its control on the right.
 fn setting_row(ui: &mut egui::Ui, label: &str, about: &str, control: impl FnOnce(&mut egui::Ui)) {
     ui.separator();
+    // The label and description wrap in the width left beside the control (measured last
+    // frame), so long descriptions never run under the buttons.
+    let id = ui.id().with(("setting_row", label));
+    let control_w = ui.data(|d| d.get_temp::<f32>(id)).unwrap_or(0.0);
     ui.horizontal(|ui| {
+        let text_w = (ui.available_width() - control_w - 16.0).max(140.0);
         ui.vertical(|ui| {
+            ui.set_max_width(text_w);
             ui.spacing_mut().item_spacing.y = 2.0;
-            ui.label(RichText::new(label).size(15.5).strong());
+            ui.add(egui::Label::new(RichText::new(label).size(15.5).strong()).wrap());
             if !about.is_empty() {
-                ui.label(RichText::new(about).size(13.0).weak());
+                ui.add(egui::Label::new(RichText::new(about).size(13.0).weak()).wrap());
             }
         });
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), control);
+        let measured = ui
+            .with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                control(ui);
+                ui.min_rect().width()
+            })
+            .inner;
+        if (measured - control_w).abs() > 0.5 {
+            ui.data_mut(|d| d.insert_temp(id, measured));
+            ui.ctx().request_repaint();
+        }
     });
 }
 
