@@ -489,6 +489,30 @@ fn chip_ex(ui: &mut egui::Ui, text: &str, color: Color32, clickable: bool) -> eg
     resp
 }
 
+/// A filter badge: the label plus a ✖ that removes it. Only the ✖ is clickable; it turns
+/// red with a pointer cursor on hover. Returns true when the ✖ is clicked.
+pub fn filter_chip(ui: &mut egui::Ui, text: &str, color: Color32, close_tip: &str) -> bool {
+    let font = FontId::proportional(11.5);
+    let label = ui.painter().layout_no_wrap(text.to_owned(), font.clone(), color);
+    let pad = egui::vec2(8.0, 3.0);
+    let (close_w, gap) = (16.0, 4.0);
+    let size = egui::vec2(pad.x + label.size().x + gap + close_w + pad.x * 0.5, label.size().y + pad.y * 2.0);
+    let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::hover());
+    let close_rect = egui::Rect::from_min_max(egui::pos2(rect.right() - pad.x * 0.5 - close_w, rect.top()), rect.right_bottom());
+    let close = ui.interact(close_rect, resp.id.with("close"), egui::Sense::click());
+    close.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, close_tip));
+    let close_color = if close.hovered() { bad() } else { color };
+    let x = ui.painter().layout_no_wrap("✖".to_owned(), font, close_color);
+    let painter = ui.painter();
+    painter.rect(rect, CornerRadius::same(10), color.linear_multiply(0.18), Stroke::new(1.0, color.linear_multiply(0.6)), egui::StrokeKind::Inside);
+    if close.hovered() {
+        painter.rect_filled(close_rect.shrink2(egui::vec2(1.0, 3.0)), CornerRadius::same(6), bad().linear_multiply(0.18));
+    }
+    painter.galley(rect.min + pad, label, color);
+    painter.galley(close_rect.center() - x.size() / 2.0, x, close_color);
+    close.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(close_tip).clicked()
+}
+
 /// Uses the bundled Noto fonts (assets/fonts, SIL Open Font License) on every OS: Noto Sans
 /// for the UI, with Noto Emoji for icons and Noto Sans JP for Japanese/Chinese chart names.
 /// egui's own fonts stay in the list as a fallback for its UI symbols.

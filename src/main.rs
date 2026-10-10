@@ -1514,7 +1514,7 @@ impl App {
             }
             let mut remove = None;
             for (k, (text, _)) in chips.iter().enumerate() {
-                if theme::chip(ui, &format!("{text}  ✖"), theme::accent_hover()).on_hover_text(t("Remove this filter")).clicked() {
+                if theme::filter_chip(ui, text, theme::accent_hover(), &t("Remove this filter")) {
                     remove = Some(k);
                 }
             }
