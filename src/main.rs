@@ -1197,7 +1197,7 @@ impl App {
                     ui,
                     Some(egui::include_image!("../assets/icons/github.svg")),
                     "GitHub",
-                    "https://github.com/RenzoraEngine/rainbow",
+                    "https://github.com/renzora/rainbow",
                     "Rainbow's source code, releases and issue tracker",
                 );
                 web_link(

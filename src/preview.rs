@@ -32,8 +32,6 @@ enum State {
 
 pub struct Preview {
     title: String,
-    /// False until the window has been placed in the middle of the screen once.
-    placed: bool,
     state: State,
     inst: u8,
     diff: u8,
@@ -58,7 +56,6 @@ impl Preview {
         });
         let inst = inst.filter(|&i| c.diffs[i as usize] >= 0).or_else(|| (0..10).find(|&i| c.diffs[i as usize] >= 0)).unwrap_or(0);
         Self {
-            placed: false,
             title: format!("{} - {}", c.artist.as_deref().unwrap_or("Unknown Artist"), c.name.as_deref().unwrap_or("Unknown")),
             state: State::Loading(rx),
             inst,
@@ -89,21 +86,17 @@ impl Preview {
         }
         let mut open = true;
         let screen = ctx.content_rect();
-        let mut window = egui::Window::new(RichText::new(format!("▶  {}", self.title)).strong())
+        let window = egui::Window::new(RichText::new(format!("▶  {}", self.title)).strong())
             .id(egui::Id::new("chart_preview"))
             // Above the blurred backdrop, which sits at the normal window level.
             .order(egui::Order::Foreground)
             .open(&mut open)
-            .default_size([360.0, 680.0f32.min(screen.height() - 60.0)]);
-        // Each newly opened preview starts in the middle; after that it can be dragged.
-        if !self.placed {
-            window = window.pivot(egui::Align2::CENTER_CENTER).current_pos(screen.center());
-            self.placed = true;
-        }
-        window
-            .min_size([280.0, 360.0])
-            .collapsible(false)
-            .show(ctx, |ui| self.contents(ui));
+            .default_size([360.0, 680.0f32.min(screen.height() - 60.0)])
+            .default_width(360.0);
+        // Pinned to the middle of the whole window (not just the space between panels), so it
+        // stays centred as it grows once the chart has loaded.
+        let window = window.pivot(egui::Align2::CENTER_CENTER).fixed_pos(screen.center());
+        window.min_size([280.0, 360.0]).collapsible(false).show(ctx, |ui| self.contents(ui));
         open
     }
 
