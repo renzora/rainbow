@@ -162,6 +162,9 @@ struct App {
     show_advanced: bool,
     show_log: bool,
     show_shortcuts: bool,
+    /// Blurred screenshot shown behind the chart preview, and whether one was requested.
+    backdrop: Option<egui::TextureHandle>,
+    backdrop_requested: bool,
     /// Measured widths of the results toolbar's two halves.
     toolbar_w: (f32, f32),
     /// Measured width of the controls beside the search box.
@@ -244,6 +247,8 @@ impl App {
             show_advanced: false,
             show_log: false,
             show_shortcuts: false,
+            backdrop: None,
+            backdrop_requested: false,
             toolbar_w: (760.0, 520.0),
             search_controls_w: 560.0,
             scroll_to: None,
@@ -500,6 +505,58 @@ impl App {
                 self.detail = Some(self.charts[self.results[c]].clone());
             }
         }
+    }
+
+    /// While the chart preview is open, covers the app with a blurred, dimmed copy of itself.
+    /// Clicking it closes the preview. Returns false on the frame the screenshot for the blur
+    /// is taken, so the preview isn't in it.
+    fn preview_backdrop(&mut self, ctx: &egui::Context) -> bool {
+        if self.preview.is_none() {
+            self.backdrop = None;
+            self.backdrop_requested = false;
+            return false;
+        }
+        let shot = ctx.input(|i| {
+            i.raw.events.iter().find_map(|e| match e {
+                egui::Event::Screenshot { image, .. } => Some(image.clone()),
+                _ => None,
+            })
+        });
+        if let Some(image) = shot {
+            self.backdrop = Some(ctx.load_texture("preview_backdrop", theme::blurred(&image), egui::TextureOptions::LINEAR));
+        }
+        if !self.backdrop_requested {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(Default::default()));
+            self.backdrop_requested = true;
+            ctx.request_repaint();
+            return false;
+        }
+
+        let screen = ctx.content_rect();
+        let mut close = false;
+        egui::Area::new(egui::Id::new("preview_backdrop"))
+            .order(egui::Order::Middle)
+            .fixed_pos(screen.min)
+            .show(ctx, |ui| {
+                let (rect, resp) = ui.allocate_exact_size(screen.size(), Sense::click());
+                let painter = ui.painter();
+                match &self.backdrop {
+                    Some(tex) => {
+                        let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+                        painter.image(tex.id(), rect, uv, Color32::WHITE);
+                        painter.rect_filled(rect, CornerRadius::ZERO, Color32::from_black_alpha(110));
+                    }
+                    None => {
+                        painter.rect_filled(rect, CornerRadius::ZERO, Color32::from_black_alpha(170));
+                    }
+                }
+                close = resp.on_hover_cursor(CursorIcon::Default).clicked();
+            });
+        if close {
+            self.preview = None;
+            return false;
+        }
+        true
     }
 
     fn shortcuts_window(&mut self, ctx: &egui::Context) {
@@ -1387,7 +1444,7 @@ impl App {
             self.request_download("All current results".to_owned(), charts);
         }
         let n = self.selected.len();
-        if ui.add_enabled(!busy && n > 0, theme::primary(format!("⬇ Download selected ({n})"))).clicked() {
+        if ui.add_enabled(!busy && n > 0, theme::download_button(format!("⬇ Download selected ({n})"))).clicked() {
             let charts = self.selected_charts();
             self.selected.clear();
             self.request_download(format!("{} selected chart(s)", charts.len()), charts);
@@ -1801,26 +1858,32 @@ impl App {
             });
 
             ui.add_space(10.0);
-            if downloaded {
-                ui.colored_label(theme::good(), RichText::new("✔ Downloaded").strong());
-            } else if ui
-                .add_enabled(self.job.is_none(), theme::primary("⬇  Download").min_size(vec2(ui.available_width() - 12.0, 34.0)))
-                .clicked()
-            {
+            // Download and Preview side by side, half the panel each.
+            let (mut download, mut open_preview) = (false, false);
+            let half = ((ui.available_width() - 12.0 - ui.spacing().item_spacing.x) / 2.0).max(60.0);
+            let busy = self.job.is_some();
+            ui.horizontal(|ui| {
+                if downloaded {
+                    let text = RichText::new("✔ Downloaded").strong().color(theme::good());
+                    ui.add_sized([half, 34.0], egui::Label::new(text));
+                } else {
+                    download = ui.add_enabled(!busy, theme::download_button("⬇  Download").min_size(vec2(half, 34.0))).clicked();
+                }
+                open_preview = ui
+                    .add(egui::Button::new(RichText::new("▶  Preview").size(14.5).strong()).min_size(vec2(half, 34.0)))
+                    .on_hover_text("Watch the notes fall, like in game (no audio)")
+                    .clicked();
+            });
+            if download {
                 self.start_download(c.title(), vec![c.clone()]);
             }
-            ui.add_space(4.0);
-            if ui
-                .add(egui::Button::new(RichText::new("▶  Preview chart").size(14.5)).min_size(vec2(ui.available_width() - 12.0, 32.0)))
-                .on_hover_text("Watch the notes fall, like in game (no audio)")
-                .clicked()
-            {
+            if open_preview {
                 self.preview = Some(preview::Preview::open(&self.client, &c, ui.ctx(), self.filters.instrument, self.filters.difficulty));
             }
 
             ui.add_space(12.0);
             ui.label(RichText::new("Instruments").strong());
-            egui::Grid::new("detail_diffs").num_columns(3).spacing([10.0, 4.0]).show(ui, |ui| {
+            egui::Grid::new("detail_diffs").num_columns(3).striped(true).min_row_height(26.0).spacing([10.0, 4.0]).show(ui, |ui| {
                 for (k, (_, name, _)) in INSTRUMENTS.iter().enumerate() {
                     let d = c.diffs[k];
                     let notes = c.notes.iter().filter(|s| s.i == k as u8).min_by_key(|s| s.d); // hardest first
@@ -2560,7 +2623,8 @@ impl eframe::App for App {
                 egui::CentralPanel::default_margins().show(ui, |ui| self.settings_tab(ui));
             }
         }
-        if let Some(p) = &mut self.preview
+        if self.preview_backdrop(&ctx)
+            && let Some(p) = &mut self.preview
             && !p.show(&ctx)
         {
             self.preview = None;

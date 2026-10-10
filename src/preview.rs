@@ -87,6 +87,8 @@ impl Preview {
         let mut open = true;
         egui::Window::new(RichText::new(format!("▶  {}", self.title)).strong())
             .id(egui::Id::new("chart_preview"))
+            // Above the blurred backdrop, which sits at the normal window level.
+            .order(egui::Order::Foreground)
             .open(&mut open)
             .default_size([360.0, 680.0])
             .min_size([280.0, 360.0])

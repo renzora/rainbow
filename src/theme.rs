@@ -82,8 +82,12 @@ pub fn difficulty_color(d: i8) -> Color32 {
 
 /// Text colour that reads well on the accent colour (black on bright accents).
 pub fn on_accent() -> Color32 {
-    let a = accent();
-    let luma = 0.299 * a.r() as f32 + 0.587 * a.g() as f32 + 0.114 * a.b() as f32;
+    text_on(accent())
+}
+
+/// Black or white, whichever reads better on `fill`.
+pub fn text_on(fill: Color32) -> Color32 {
+    let luma = 0.299 * fill.r() as f32 + 0.587 * fill.g() as f32 + 0.114 * fill.b() as f32;
     if luma > 160.0 { Color32::BLACK } else { Color32::WHITE }
 }
 
@@ -594,4 +598,68 @@ pub fn back_to_top(ui: &mut egui::Ui) -> egui::Response {
     let text_pos = egui::pos2(rect.left() + pad + arrow_w + gap, rect.center().y - galley.size().y / 2.0);
     painter.galley(text_pos, galley, Color32::WHITE);
     resp
+}
+
+/// A filled button in the "good" colour (green, or the colour-blind safe equivalent),
+/// used for downloads.
+pub fn download_button(text: impl Into<String>) -> egui::Button<'static> {
+    let fill = good();
+    egui::Button::new(egui::RichText::new(text.into()).color(text_on(fill)).strong()).fill(fill)
+}
+
+/// A soft, heavily blurred copy of a screenshot, for frosted-glass backdrops. The image is
+/// shrunk first (which blurs and keeps it cheap), then box-blurred; drawing it stretched
+/// with linear filtering smooths it further.
+pub fn blurred(image: &egui::ColorImage) -> egui::ColorImage {
+    const SHRINK: usize = 8;
+    const RADIUS: usize = 3;
+    let [w, h] = image.size;
+    let (sw, sh) = ((w / SHRINK).max(1), (h / SHRINK).max(1));
+    let mut small = vec![[0f32; 3]; sw * sh];
+    for y in 0..sh {
+        for x in 0..sw {
+            let mut acc = [0f32; 3];
+            let mut n = 0.0f32;
+            for yy in y * SHRINK..((y + 1) * SHRINK).min(h) {
+                for xx in x * SHRINK..((x + 1) * SHRINK).min(w) {
+                    let p = image.pixels[yy * w + xx];
+                    acc[0] += p.r() as f32;
+                    acc[1] += p.g() as f32;
+                    acc[2] += p.b() as f32;
+                    n += 1.0;
+                }
+            }
+            small[y * sw + x] = acc.map(|v| v / n.max(1.0));
+        }
+    }
+    // Three box-blur passes in each direction approximate a Gaussian.
+    let mut tmp = small.clone();
+    for _ in 0..3 {
+        for y in 0..sh {
+            for x in 0..sw {
+                let (lo, hi) = (x.saturating_sub(RADIUS), (x + RADIUS).min(sw - 1));
+                let mut acc = [0f32; 3];
+                for xx in lo..=hi {
+                    for c in 0..3 {
+                        acc[c] += small[y * sw + xx][c];
+                    }
+                }
+                tmp[y * sw + x] = acc.map(|v| v / (hi - lo + 1) as f32);
+            }
+        }
+        for y in 0..sh {
+            for x in 0..sw {
+                let (lo, hi) = (y.saturating_sub(RADIUS), (y + RADIUS).min(sh - 1));
+                let mut acc = [0f32; 3];
+                for yy in lo..=hi {
+                    for c in 0..3 {
+                        acc[c] += tmp[yy * sw + x][c];
+                    }
+                }
+                small[y * sw + x] = acc.map(|v| v / (hi - lo + 1) as f32);
+            }
+        }
+    }
+    let pixels = small.iter().map(|p| Color32::from_rgb(p[0] as u8, p[1] as u8, p[2] as u8)).collect();
+    egui::ColorImage { size: [sw, sh], source_size: egui::vec2(sw as f32, sh as f32), pixels }
 }
