@@ -849,10 +849,9 @@ impl App {
     // ─────────────────────────────── Header ───────────────────────────────
 
     fn header(&mut self, ui: &mut egui::Ui) {
-        ui.add_space(6.0);
         ui.horizontal(|ui| {
             if let Some(logo) = &self.logo {
-                ui.add(egui::Image::new(logo).fit_to_exact_size(vec2(38.0, 38.0)));
+                ui.add(egui::Image::new(logo).fit_to_exact_size(vec2(36.0, 36.0)).corner_radius(CornerRadius::same(9)));
             }
             ui.label(theme::title(24.0));
             ui.add_space(18.0);
@@ -877,7 +876,7 @@ impl App {
                 }
             });
         });
-        ui.add_space(6.0);
+        
     }
 
     // ───────────────────────────── Browse tab ─────────────────────────────
@@ -2278,7 +2277,7 @@ fn credit(ui: &mut egui::Ui, logo: Option<&egui::TextureHandle>, height: f32) {
     let text_pos = egui::pos2(rect.left() + pad_l + logo_w, rect.center().y - text.size().y / 2.0);
     painter.galley(text_pos, text, ui.visuals().text_color());
     resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Link, true, "Renzora Studios"));
-    if resp.on_hover_text(RENZORA_URL).clicked() {
+    if resp.on_hover_cursor(CursorIcon::PointingHand).on_hover_text(RENZORA_URL).clicked() {
         ui.ctx().open_url(egui::OpenUrl::new_tab(RENZORA_URL));
     }
 }
@@ -2923,7 +2922,11 @@ impl eframe::App for App {
         self.handle_drops(&ctx);
         self.keyboard(&ctx);
 
-        egui::Panel::top("header").show(ui, |ui| self.header(ui));
+        // Even padding above and below the header row.
+        let header_frame = egui::Frame::new()
+            .fill(ui.visuals().panel_fill)
+            .inner_margin(egui::Margin { left: 12, right: 12, top: 8, bottom: 8 });
+        egui::Panel::top("header").frame(header_frame).show(ui, |ui| self.header(ui));
         let status_frame = egui::Frame::new()
             .fill(ui.visuals().panel_fill)
             .stroke(ui.visuals().widgets.noninteractive.bg_stroke)

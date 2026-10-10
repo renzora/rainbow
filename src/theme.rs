@@ -444,11 +444,17 @@ pub fn primary(text: impl Into<String>) -> egui::Button<'static> {
     egui::Button::new(egui::RichText::new(text.into()).color(on_accent()).strong()).fill(accent())
 }
 
-/// "Rainbow" with each letter in a logo colour, in the bold face.
+/// "Rainbow" in the bold face with a soft pink, lavender and sky-blue gradient across it.
 pub fn title(size: f32) -> egui::text::LayoutJob {
+    const STOPS: [Color32; 3] = [rgb(255, 128, 182), rgb(184, 146, 255), rgb(112, 196, 255)];
     let mut job = egui::text::LayoutJob::default();
     let font = FontId::new(size, egui::FontFamily::Name("bold".into()));
-    for (ch, color) in "RAINBOW".chars().zip(RAINBOW) {
+    let letters: Vec<char> = "RAINBOW".chars().collect();
+    for (i, ch) in letters.iter().enumerate() {
+        // Position along the word (0..1), blended between the two nearest stops.
+        let p = i as f32 / (letters.len() - 1) as f32 * (STOPS.len() - 1) as f32;
+        let k = (p.floor() as usize).min(STOPS.len() - 2);
+        let color = STOPS[k].lerp_to_gamma(STOPS[k + 1], p - k as f32);
         job.append(&ch.to_string(), 0.0, egui::TextFormat { font_id: font.clone(), color, ..Default::default() });
     }
     job
