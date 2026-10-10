@@ -123,7 +123,6 @@
     "Show this genre": "Afficher ce genre",
     "Show songs from this year": "Afficher les chansons de cette année",
     "Show everything charted by this charter": "Afficher tout ce qu'a fait ce charter",
-    "Close": "Fermer",
     "Unknown": "Inconnu",
     "Copy song name": "Copier le nom de la chanson",
     "Copy \"Artist - Song\"": "Copier \"Artiste - Chanson\"",
@@ -195,6 +194,8 @@
     "Swaps status and difficulty colours for ones that stay distinct. Icons and numbers always show the meaning too.": "Remplace les couleurs d'état et de difficulté par d'autres qui restent distinctes. Les icônes et les chiffres indiquent toujours aussi le sens.",
     "Reduce motion": "Réduire les animations",
     "Turns off animations and smooth scrolling.": "Désactive les animations et le défilement fluide.",
+    "Scroll speed": "Vitesse de défilement",
+    "How far the mouse wheel and touchpad scroll lists and panels.": "Distance parcourue par la molette et le pavé tactile dans les listes et les panneaux.",
     "High contrast": "Contraste élevé",
     "Pure black and white with a bright accent. Pick it under Theme.": "Noir et blanc purs avec une couleur d'accent vive. Choisissez-le dans Thème.",
     "Text size": "Taille du texte",
@@ -330,6 +331,8 @@
     "Synthwave": "Synthwave",
     "Ocean": "Ocean",
     "Forest": "Forest",
-    "Sunset": "Sunset"
+    "Sunset": "Sunset",
+    "✖  Close panel": "✖  Fermer le panneau",
+    "Hide the song details": "Masquer les détails du morceau"
   }
 }

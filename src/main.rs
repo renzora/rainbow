@@ -973,6 +973,14 @@ impl App {
                     ui.selectable_value(&mut f.game, Some(g.clone()), format!("{}  ({n})", games::game_name(&g)));
                 }
             });
+            // Closes the song details panel, which sits under this corner.
+            if self.detail.is_some() {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button(t("✖  Close panel")).on_hover_text(t("Hide the song details")).clicked() {
+                        self.detail = None;
+                    }
+                });
+            }
         });
     }
 
@@ -1981,17 +1989,8 @@ impl App {
             return;
         };
         let downloaded = self.manifest.lock().unwrap().contains(&c.md5);
-        // The close button stays put above the scrolling details.
-        ui.add_space(8.0);
-        ui.horizontal(|ui| {
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.small_button("✖").on_hover_text(t("Close")).clicked() {
-                    self.detail = None;
-                }
-            });
-        });
-        ui.add_space(4.0);
         fancy_scroll(ui, "detail", |ui| {
+            ui.add_space(8.0);
             let size = ui.available_width().min(320.0);
             ui.vertical_centered(|ui| cover(ui, &mut self.covers, c.art.as_deref(), size, covers::LARGE));
             ui.add_space(8.0);
@@ -2547,6 +2546,9 @@ fn accessibility_card(ui: &mut egui::Ui, s: &mut Settings, width: f32, actions: 
         setting_row(ui, &t("Reduce motion"), &t("Turns off animations and smooth scrolling."), |ui| {
             theme::checkbox(ui, &mut s.reduce_motion, "");
         });
+        setting_row(ui, &t("Scroll speed"), &t("How far the mouse wheel and touchpad scroll lists and panels."), |ui| {
+            ui.add(egui::Slider::new(&mut s.scroll_speed, 0.25..=4.0).step_by(0.05).custom_formatter(|v, _| format!("{:.0}%", v * 100.0)));
+        });
         setting_row(ui, &t("High contrast"), &t("Pure black and white with a bright accent. Pick it under Theme."), |ui| {
             let mut on = s.theme == theme::ThemeKind::HighContrast;
             if theme::checkbox(ui, &mut on, "").changed() {
@@ -2965,6 +2967,23 @@ fn open_folder(dir: &std::path::Path) {
 }
 
 impl eframe::App for App {
+    /// Applies the scroll speed setting to wheel and touchpad scrolling (but not Ctrl+wheel
+    /// zooming).
+    fn raw_input_hook(&mut self, _ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        let speed = self.settings.scroll_speed;
+        if (speed - 1.0).abs() < f32::EPSILON {
+            return;
+        }
+        for event in &mut raw_input.events {
+            if let egui::Event::MouseWheel { delta, modifiers, .. } = event
+                && !modifiers.command
+                && !modifiers.ctrl
+            {
+                *delta *= speed;
+            }
+        }
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.handle_messages();
         self.covers.poll();

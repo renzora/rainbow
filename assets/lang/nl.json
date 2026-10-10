@@ -123,7 +123,6 @@
     "Show this genre": "Dit genre tonen",
     "Show songs from this year": "Nummers uit dit jaar tonen",
     "Show everything charted by this charter": "Alles van deze charter tonen",
-    "Close": "Sluiten",
     "Unknown": "Onbekend",
     "Copy song name": "Nummernaam kopiëren",
     "Copy \"Artist - Song\"": "\"Artiest - Nummer\" kopiëren",
@@ -195,6 +194,8 @@
     "Swaps status and difficulty colours for ones that stay distinct. Icons and numbers always show the meaning too.": "Vervangt status- en moeilijkheidskleuren door goed te onderscheiden kleuren. Iconen en cijfers tonen de betekenis altijd ook.",
     "Reduce motion": "Beweging beperken",
     "Turns off animations and smooth scrolling.": "Schakelt animaties en vloeiend scrollen uit.",
+    "Scroll speed": "Scrollsnelheid",
+    "How far the mouse wheel and touchpad scroll lists and panels.": "Hoe ver het muiswiel en touchpad lijsten en panelen scrollen.",
     "High contrast": "Hoog contrast",
     "Pure black and white with a bright accent. Pick it under Theme.": "Puur zwart-wit met een felle accentkleur. Kies het onder Thema.",
     "Text size": "Tekstgrootte",
@@ -330,6 +331,8 @@
     "Synthwave": "Synthwave",
     "Ocean": "Ocean",
     "Forest": "Forest",
-    "Sunset": "Sunset"
+    "Sunset": "Sunset",
+    "✖  Close panel": "✖  Paneel sluiten",
+    "Hide the song details": "Nummerdetails verbergen"
   }
 }

@@ -123,7 +123,6 @@
     "Show this genre": "Zobrazit tento žánr",
     "Show songs from this year": "Zobrazit skladby z tohoto roku",
     "Show everything charted by this charter": "Zobrazit všechny charty od tohoto chartera",
-    "Close": "Zavřít",
     "Unknown": "Neznámé",
     "Copy song name": "Kopírovat název skladby",
     "Copy \"Artist - Song\"": "Kopírovat „Interpret - Skladba“",
@@ -195,6 +194,8 @@
     "Swaps status and difficulty colours for ones that stay distinct. Icons and numbers always show the meaning too.": "Nahradí barvy stavu a obtížnosti snadno rozlišitelnými. Ikony a čísla význam vždy ukazují také.",
     "Reduce motion": "Omezit pohyb",
     "Turns off animations and smooth scrolling.": "Vypne animace a plynulé posouvání.",
+    "Scroll speed": "Rychlost posouvání",
+    "How far the mouse wheel and touchpad scroll lists and panels.": "Jak daleko kolečko myši a touchpad posouvají seznamy a panely.",
     "High contrast": "Vysoký kontrast",
     "Pure black and white with a bright accent. Pick it under Theme.": "Čistě černá a bílá s výrazným akcentem. Vyberte ho v části Motiv.",
     "Text size": "Velikost textu",
@@ -330,6 +331,8 @@
     "Synthwave": "Synthwave",
     "Ocean": "Ocean",
     "Forest": "Forest",
-    "Sunset": "Sunset"
+    "Sunset": "Sunset",
+    "✖  Close panel": "✖  Zavřít panel",
+    "Hide the song details": "Skrýt podrobnosti skladby"
   }
 }

@@ -123,7 +123,6 @@
     "Show this genre": "顯示此曲風",
     "Show songs from this year": "顯示這一年的歌曲",
     "Show everything charted by this charter": "顯示此譜面作者的所有譜面",
-    "Close": "關閉",
     "Unknown": "未知",
     "Copy song name": "複製歌名",
     "Copy \"Artist - Song\"": "複製「演出者 - 歌曲」",
@@ -195,6 +194,8 @@
     "Swaps status and difficulty colours for ones that stay distinct. Icons and numbers always show the meaning too.": "將狀態與難度顏色換成易於區分的顏色。圖示與數字也一律會顯示其含義。",
     "Reduce motion": "減少動畫",
     "Turns off animations and smooth scrolling.": "關閉動畫與平滑捲動。",
+    "Scroll speed": "捲動速度",
+    "How far the mouse wheel and touchpad scroll lists and panels.": "滑鼠滾輪和觸控板捲動清單和面板的距離。",
     "High contrast": "高對比",
     "Pure black and white with a bright accent. Pick it under Theme.": "純黑白配色加上亮色強調。可在「主題」中選擇。",
     "Text size": "文字大小",
@@ -330,6 +331,8 @@
     "Synthwave": "Synthwave",
     "Ocean": "Ocean",
     "Forest": "Forest",
-    "Sunset": "Sunset"
+    "Sunset": "Sunset",
+    "✖  Close panel": "✖  關閉面板",
+    "Hide the song details": "隱藏歌曲詳細資料"
   }
 }

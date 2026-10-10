@@ -123,7 +123,6 @@
     "Show this genre": "Tampilkan genre ini",
     "Show songs from this year": "Tampilkan lagu dari tahun ini",
     "Show everything charted by this charter": "Tampilkan semua chart buatan charter ini",
-    "Close": "Tutup",
     "Unknown": "Tidak diketahui",
     "Copy song name": "Salin nama lagu",
     "Copy \"Artist - Song\"": "Salin \"Artis - Lagu\"",
@@ -195,6 +194,8 @@
     "Swaps status and difficulty colours for ones that stay distinct. Icons and numbers always show the meaning too.": "Mengganti warna status dan kesulitan dengan warna yang tetap mudah dibedakan. Ikon dan angka juga selalu menunjukkan artinya.",
     "Reduce motion": "Kurangi gerakan",
     "Turns off animations and smooth scrolling.": "Mematikan animasi dan gulir halus.",
+    "Scroll speed": "Kecepatan gulir",
+    "How far the mouse wheel and touchpad scroll lists and panels.": "Seberapa jauh roda mouse dan touchpad menggulir daftar dan panel.",
     "High contrast": "Kontras tinggi",
     "Pure black and white with a bright accent. Pick it under Theme.": "Hitam putih murni dengan aksen terang. Pilih di bagian Tema.",
     "Text size": "Ukuran teks",
@@ -330,6 +331,8 @@
     "Synthwave": "Synthwave",
     "Ocean": "Ocean",
     "Forest": "Forest",
-    "Sunset": "Sunset"
+    "Sunset": "Sunset",
+    "✖  Close panel": "✖  Tutup panel",
+    "Hide the song details": "Sembunyikan detail lagu"
   }
 }

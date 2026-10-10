@@ -123,7 +123,6 @@
     "Show this genre": "このジャンルを表示",
     "Show songs from this year": "この年の曲を表示",
     "Show everything charted by this charter": "この譜面作者の譜面をすべて表示",
-    "Close": "閉じる",
     "Unknown": "不明",
     "Copy song name": "曲名をコピー",
     "Copy \"Artist - Song\"": "「アーティスト - 曲名」をコピー",
@@ -195,6 +194,8 @@
     "Swaps status and difficulty colours for ones that stay distinct. Icons and numbers always show the meaning too.": "状態と難易度の色を見分けやすい色に置き換えます。アイコンと数字でも常に意味を示します。",
     "Reduce motion": "動きを減らす",
     "Turns off animations and smooth scrolling.": "アニメーションとスムーズスクロールをオフにします。",
+    "Scroll speed": "スクロール速度",
+    "How far the mouse wheel and touchpad scroll lists and panels.": "マウスホイールやタッチパッドでリストやパネルをスクロールする量です。",
     "High contrast": "ハイコントラスト",
     "Pure black and white with a bright accent. Pick it under Theme.": "純粋な白黒に明るいアクセント。テーマで選択できます。",
     "Text size": "文字サイズ",
@@ -330,6 +331,8 @@
     "Synthwave": "Synthwave",
     "Ocean": "Ocean",
     "Forest": "Forest",
-    "Sunset": "Sunset"
+    "Sunset": "Sunset",
+    "✖  Close panel": "✖  パネルを閉じる",
+    "Hide the song details": "曲の詳細を隠す"
   }
 }

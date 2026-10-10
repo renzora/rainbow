@@ -123,7 +123,6 @@
     "Show this genre": "显示此流派",
     "Show songs from this year": "显示这一年的歌曲",
     "Show everything charted by this charter": "显示此谱面作者的所有谱面",
-    "Close": "关闭",
     "Unknown": "未知",
     "Copy song name": "复制歌名",
     "Copy \"Artist - Song\"": "复制“艺人 - 歌曲”",
@@ -195,6 +194,8 @@
     "Swaps status and difficulty colours for ones that stay distinct. Icons and numbers always show the meaning too.": "将状态和难度颜色换成易于区分的颜色。图标和数字也始终会显示其含义。",
     "Reduce motion": "减少动画",
     "Turns off animations and smooth scrolling.": "关闭动画和平滑滚动。",
+    "Scroll speed": "滚动速度",
+    "How far the mouse wheel and touchpad scroll lists and panels.": "鼠标滚轮和触控板滚动列表和面板的距离。",
     "High contrast": "高对比度",
     "Pure black and white with a bright accent. Pick it under Theme.": "纯黑白配色加亮色强调。可在“主题”中选择。",
     "Text size": "文字大小",
@@ -330,6 +331,8 @@
     "Synthwave": "Synthwave",
     "Ocean": "Ocean",
     "Forest": "Forest",
-    "Sunset": "Sunset"
+    "Sunset": "Sunset",
+    "✖  Close panel": "✖  关闭面板",
+    "Hide the song details": "隐藏歌曲详情"
   }
 }

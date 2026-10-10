@@ -123,7 +123,6 @@
     "Show this genre": "Показать этот жанр",
     "Show songs from this year": "Показать песни этого года",
     "Show everything charted by this charter": "Показать все чарты этого чартера",
-    "Close": "Закрыть",
     "Unknown": "Неизвестно",
     "Copy song name": "Копировать название песни",
     "Copy \"Artist - Song\"": "Копировать «Исполнитель - Песня»",
@@ -195,6 +194,8 @@
     "Swaps status and difficulty colours for ones that stay distinct. Icons and numbers always show the meaning too.": "Заменяет цвета статусов и сложностей на хорошо различимые. Значки и числа всегда тоже показывают смысл.",
     "Reduce motion": "Меньше движения",
     "Turns off animations and smooth scrolling.": "Отключает анимации и плавную прокрутку.",
+    "Scroll speed": "Скорость прокрутки",
+    "How far the mouse wheel and touchpad scroll lists and panels.": "Насколько колесо мыши и тачпад прокручивают списки и панели.",
     "High contrast": "Высокий контраст",
     "Pure black and white with a bright accent. Pick it under Theme.": "Чистый чёрный и белый с ярким акцентом. Выберите в разделе «Тема».",
     "Text size": "Размер текста",
@@ -330,6 +331,8 @@
     "Synthwave": "Synthwave",
     "Ocean": "Ocean",
     "Forest": "Forest",
-    "Sunset": "Sunset"
+    "Sunset": "Sunset",
+    "✖  Close panel": "✖  Закрыть панель",
+    "Hide the song details": "Скрыть сведения о песне"
   }
 }

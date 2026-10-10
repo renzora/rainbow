@@ -91,6 +91,8 @@ pub struct Settings {
     pub color_blind: crate::theme::ColorBlind,
     /// Turn off animations.
     pub reduce_motion: bool,
+    /// Multiplier for mouse wheel and touchpad scrolling (1 = egui's normal speed).
+    pub scroll_speed: f32,
     /// Cover size in the results table, in points (drag the cover column to change it).
     pub cover_size: f32,
 }
@@ -113,6 +115,7 @@ impl Default for Settings {
             font: crate::theme::UiFont::default(),
             color_blind: crate::theme::ColorBlind::Off,
             reduce_motion: false,
+            scroll_speed: 1.0,
             auto_extract: false,
             delete_zips: false,
             auto_convert: true,

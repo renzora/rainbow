@@ -123,7 +123,6 @@
     "Show this genre": "Visa den här genren",
     "Show songs from this year": "Visa låtar från det här året",
     "Show everything charted by this charter": "Visa allt som den här chartern har gjort",
-    "Close": "Stäng",
     "Unknown": "Okänd",
     "Copy song name": "Kopiera låtnamn",
     "Copy \"Artist - Song\"": "Kopiera ”Artist - Låt”",
@@ -195,6 +194,8 @@
     "Swaps status and difficulty colours for ones that stay distinct. Icons and numbers always show the meaning too.": "Byter status- och svårighetsfärger mot sådana som går att skilja åt. Ikoner och siffror visar alltid betydelsen också.",
     "Reduce motion": "Minska rörelse",
     "Turns off animations and smooth scrolling.": "Stänger av animationer och mjuk rullning.",
+    "Scroll speed": "Rullningshastighet",
+    "How far the mouse wheel and touchpad scroll lists and panels.": "Hur långt mushjulet och styrplattan rullar listor och paneler.",
     "High contrast": "Hög kontrast",
     "Pure black and white with a bright accent. Pick it under Theme.": "Rent svart och vitt med en klar accentfärg. Välj det under Tema.",
     "Text size": "Textstorlek",
@@ -330,6 +331,8 @@
     "Synthwave": "Synthwave",
     "Ocean": "Ocean",
     "Forest": "Forest",
-    "Sunset": "Sunset"
+    "Sunset": "Sunset",
+    "✖  Close panel": "✖  Stäng panelen",
+    "Hide the song details": "Dölj låtinformationen"
   }
 }

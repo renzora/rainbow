@@ -123,7 +123,6 @@
     "Show this genre": "Показати цей жанр",
     "Show songs from this year": "Показати пісні цього року",
     "Show everything charted by this charter": "Показати всі чарти цього чартера",
-    "Close": "Закрити",
     "Unknown": "Невідомо",
     "Copy song name": "Копіювати назву пісні",
     "Copy \"Artist - Song\"": "Копіювати «Виконавець - Пісня»",
@@ -195,6 +194,8 @@
     "Swaps status and difficulty colours for ones that stay distinct. Icons and numbers always show the meaning too.": "Замінює кольори статусів і складностей на добре розрізненні. Значки й числа завжди теж показують значення.",
     "Reduce motion": "Менше руху",
     "Turns off animations and smooth scrolling.": "Вимикає анімації та плавне прокручування.",
+    "Scroll speed": "Швидкість прокручування",
+    "How far the mouse wheel and touchpad scroll lists and panels.": "Наскільки коліщатко миші й тачпад прокручують списки та панелі.",
     "High contrast": "Висока контрастність",
     "Pure black and white with a bright accent. Pick it under Theme.": "Чистий чорний і білий з яскравим акцентом. Виберіть у розділі «Тема».",
     "Text size": "Розмір тексту",
@@ -330,6 +331,8 @@
     "Synthwave": "Synthwave",
     "Ocean": "Ocean",
     "Forest": "Forest",
-    "Sunset": "Sunset"
+    "Sunset": "Sunset",
+    "✖  Close panel": "✖  Закрити панель",
+    "Hide the song details": "Сховати відомості про пісню"
   }
 }
