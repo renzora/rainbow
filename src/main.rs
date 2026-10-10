@@ -1231,6 +1231,9 @@ impl App {
             }
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.label(RichText::new(concat!("v", env!("CARGO_PKG_VERSION"))).monospace().weak())
+                    .on_hover_text(t("Rainbow version"));
+                ui.separator();
                 web_link(
                     ui,
                     Some(egui::include_image!("../assets/icons/github.svg")),
@@ -2208,7 +2211,7 @@ impl App {
                         ui.ctx().open_url(egui::OpenUrl::new_tab(RENZORA_URL));
                     }
                 }
-                ui.label(RichText::new(t("Created by Renzora Studios")).strong().size(15.0));
+                ui.label(RichText::new("Renzora Studios").strong().size(15.0));
                 ui.weak(concat!("Rainbow v", env!("CARGO_PKG_VERSION")));
             });
             ui.add_space(12.0);
@@ -2250,9 +2253,9 @@ impl App {
     }
 }
 
-/// "Created by Renzora Studios" with the studio's logo; links to its GitHub.
+/// "Renzora Studios" with the studio's logo; links to its GitHub.
 fn credit(ui: &mut egui::Ui, logo: Option<&egui::TextureHandle>, height: f32) {
-    let text = RichText::new(t("Created by Renzora Studios")).size(13.0).color(ui.visuals().weak_text_color());
+    let text = RichText::new("Renzora Studios").size(13.0).color(ui.visuals().weak_text_color());
     let resp = match logo {
         Some(tex) => {
             let image = egui::Image::new(tex).fit_to_exact_size(vec2(height * 110.0 / 128.0, height));
