@@ -621,14 +621,20 @@ impl App {
             return;
         }
         let screen = ctx.content_rect();
-        let width = (screen.width() - 36.0).max(300.0);
+        let width = screen.width();
         let max_height = (screen.bottom() - self.search_bottom - 70.0).max(150.0);
         egui::Area::new(egui::Id::new("advanced_search"))
             .order(egui::Order::Foreground)
-            .fixed_pos(egui::pos2(screen.left() + 10.0, self.search_bottom + 2.0))
+            .fixed_pos(egui::pos2(screen.left(), self.search_bottom))
             .show(ctx, |ui| {
-                egui::Frame::popup(ui.style()).inner_margin(egui::Margin::same(12)).show(ui, |ui| {
-                    ui.set_width(width - 24.0);
+                // Full width, flush under the search bar, like a drop-down sheet.
+                let frame = egui::Frame::new()
+                    .fill(ui.visuals().panel_fill)
+                    .shadow(ui.visuals().popup_shadow)
+                    .corner_radius(CornerRadius { nw: 0, ne: 0, sw: 12, se: 12 })
+                    .inner_margin(egui::Margin::symmetric(16, 12));
+                frame.show(ui, |ui| {
+                    ui.set_width(width - 32.0);
                     ui.horizontal(|ui| {
                         ui.label(RichText::new("🎛  Advanced search").size(17.0).strong().color(theme::ACCENT_HOVER));
                         ui.weak(format!("{} results", self.results.len()));
