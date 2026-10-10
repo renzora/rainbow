@@ -90,7 +90,7 @@ enum Tab {
     Settings,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 enum Col {
     Check,
     Cover,
@@ -942,7 +942,9 @@ impl App {
         self.show_log = open;
     }
 
-    fn columns(&self) -> Vec<Col> {
+    /// The columns to show at this table width: the ones enabled in Settings, minus the least
+    /// important ones while they don't fit. Name then stretches to fill the rest.
+    fn columns(&self, avail: f32) -> Vec<Col> {
         let c = &self.settings.columns;
         let mut cols = vec![Col::Check];
         if c.cover {
@@ -964,7 +966,33 @@ impl App {
             }
         }
         cols.push(Col::Tags);
+
+        let width = |cols: &[Col]| cols.iter().map(|&col| self.column_width(col) + 8.0).sum::<f32>();
+        for drop in [Col::Uploaded, Col::Year, Col::Genre, Col::Tags, Col::Length, Col::Album, Col::Charter, Col::Difficulty] {
+            if width(&cols) <= avail {
+                break;
+            }
+            cols.retain(|&c| c != drop);
+        }
         cols
+    }
+
+    /// Starting width of each column (Name's is its minimum; it grows to fill).
+    fn column_width(&self, col: Col) -> f32 {
+        match col {
+            Col::Check => 36.0,
+            Col::Cover => self.settings.cover_size + 16.0,
+            Col::Name => 200.0,
+            Col::Artist => 160.0,
+            Col::Album => 160.0,
+            Col::Genre => 115.0,
+            Col::Year => 52.0,
+            Col::Charter => 120.0,
+            Col::Length => 60.0,
+            Col::Difficulty => 105.0,
+            Col::Uploaded => 90.0,
+            Col::Tags => 120.0,
+        }
     }
 
     fn toolbar_left(&mut self, ui: &mut egui::Ui, wide: bool) {
@@ -1043,7 +1071,8 @@ impl App {
         }
         ui.add_space(4.0);
 
-        let cols = self.columns();
+        let cols = self.columns(ui.available_width());
+        let widths: Vec<f32> = cols.iter().map(|&c| self.column_width(c)).collect();
         let manifest = self.manifest.lock().unwrap();
         let mut click = None;
         let mut sort_click = None;
@@ -1074,7 +1103,8 @@ impl App {
         };
         let mut table = TableBuilder::new(ui)
             // A new id when the layout preset changes, so remembered column widths reset.
-            .id_salt(format!("results-{}", self.table_gen))
+            // Separate remembered widths per layout and per set of visible columns.
+            .id_salt(format!("results-{}-{:?}", self.table_gen, cols))
             .striped(true)
             .resizable(true)
             .sense(Sense::click())
@@ -1082,19 +1112,13 @@ impl App {
         if std::mem::take(&mut self.scroll_to_top) {
             table = table.scroll_to_row(0, None);
         }
-        for col in &cols {
+        for (&col, &w) in cols.iter().zip(&widths) {
             table = table.column(match col {
-                Col::Check => Column::exact(36.0),
-                Col::Cover => Column::initial(self.settings.cover_size + 16.0).range(32.0..=250.0),
-                Col::Name => Column::initial(240.0).at_least(80.0).clip(true),
-                Col::Artist | Col::Album => Column::initial(170.0).at_least(40.0).clip(true),
-                Col::Genre => Column::initial(110.0).at_least(40.0).clip(true),
-                Col::Charter => Column::initial(120.0).at_least(40.0).clip(true),
-                Col::Year => Column::initial(50.0).at_least(30.0).clip(true),
-                Col::Length => Column::initial(55.0).at_least(30.0),
-                Col::Difficulty => Column::initial(110.0).at_least(40.0).clip(true),
-                Col::Uploaded => Column::initial(85.0).at_least(40.0),
-                Col::Tags => Column::remainder().at_least(110.0).clip(true),
+                Col::Check => Column::exact(w),
+                Col::Cover => Column::initial(w).range(32.0..=250.0),
+                // Not user-resizable, so it keeps stretching to fill the width as the window changes.
+                Col::Name => Column::remainder().at_least(140.0).clip(true).resizable(false),
+                _ => Column::initial(w).at_least(40.0).clip(true),
             });
         }
         let scroll = table
