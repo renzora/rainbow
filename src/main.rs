@@ -822,7 +822,6 @@ impl App {
                         job.checked = checked;
                         job.downloaded = downloaded;
                         job.failed = failed;
-                        job.file = None;
                     }
                 }
                 Msg::Status(s) => {
@@ -1341,11 +1340,15 @@ impl App {
                 self.stop.store(true, Ordering::Relaxed);
             }
         });
-        ui.add(egui::ProgressBar::new(job.checked as f32 / job.total.max(1) as f32).show_percentage().fill(theme::accent()));
-        if let Some((title, done, total)) = &job.file {
-            let frac = total.map(|t| *done as f32 / t.max(1) as f32).unwrap_or(0.0);
-            ui.add(egui::ProgressBar::new(frac).text(format!("{title}  ({:.1} MB)", *done as f64 / 1_048_576.0)));
-        }
+        // One bar for the whole job, naming the song being downloaded (the last one stays
+        // named until the next starts, so the text doesn't flicker).
+        let frac = job.checked as f32 / job.total.max(1) as f32;
+        let percent = if frac < 0.1 { format!("{:.1}%", frac * 100.0) } else { format!("{:.0}%", frac * 100.0) };
+        let text = match &job.file {
+            Some((title, done, _)) => format!("{percent}   ·   {title}  ({:.1} MB)", *done as f64 / 1_048_576.0),
+            None => percent,
+        };
+        ui.add(egui::ProgressBar::new(frac).text(text).fill(theme::accent()));
         ui.add_space(4.0);
     }
 
