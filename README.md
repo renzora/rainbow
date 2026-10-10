@@ -56,7 +56,7 @@ Simplified and Traditional Chinese.
 
 Each language is one file in `assets/lang/` that maps the English text to its translation.
 To fix a translation or add a language without rebuilding, put a file in
-`%LOCALAPPDATA%ainbow\lang\` (copy `assets/lang/template.json` to start a new one; the
+`%LOCALAPPDATA%\rainbow\lang\` (copy `assets/lang/template.json` to start a new one; the
 file name is the language code, e.g. `pt-PT.json`). For contributors:
 
 - `python tools/extract_strings.py` refreshes `template.json` after code changes.

@@ -33,7 +33,7 @@ for path in sorted(Path("assets/lang").glob("*.json")):
         lead = icon.match(key)
         if lead and not value.startswith(lead.group(1)):
             issues.append(f"leading icon changed in {key!r}: {value!r}")
-        if "—" in value:
+        if chr(0x2014) in value:  # em dash
             issues.append(f"em dash in {key!r}")
     problems += len(issues)
     print(f"{path.stem:6} {data.get('name', '?'):22} {'OK' if not issues else f'{len(issues)} issue(s)'}")
