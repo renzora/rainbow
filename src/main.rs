@@ -959,8 +959,7 @@ impl App {
             ui.horizontal(|ui| {
                 ui.monospace(s.dir.display().to_string());
                 if ui.button("Open Folder").clicked() {
-                    let _ = std::fs::create_dir_all(&s.dir);
-                    let _ = std::process::Command::new("explorer").arg(&s.dir).spawn();
+                    open_folder(&s.dir);
                 }
                 if ui.add_enabled(!busy, egui::Button::new("Choose…")).clicked()
                     && let Some(dir) = rfd::FileDialog::new().set_directory(&s.dir).pick_folder()
@@ -1106,6 +1105,19 @@ fn difficulty_text(c: &Chart, instrument: Option<u8>) -> String {
         }
     }
     parts.join(" ")
+}
+
+/// Opens a folder in the system file manager.
+fn open_folder(dir: &std::path::Path) {
+    let _ = std::fs::create_dir_all(dir);
+    let program = if cfg!(target_os = "windows") {
+        "explorer"
+    } else if cfg!(target_os = "macos") {
+        "open"
+    } else {
+        "xdg-open"
+    };
+    let _ = std::process::Command::new(program).arg(dir).spawn();
 }
 
 fn apply_appearance(ctx: &egui::Context, s: &Settings) {
