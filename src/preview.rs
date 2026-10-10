@@ -3,6 +3,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::AtomicU32;
 use std::sync::mpsc::{Receiver, channel};
 use std::thread;
 use std::time::Instant;
@@ -17,7 +18,6 @@ use crate::api::{Chart, Client, DIFFICULTIES, INSTRUMENTS};
 use crate::chart::{self, BAR, Kind, Layout, Parsed, Song, Track};
 use crate::optimal::{self, Outcome};
 use crate::pathchart;
-use crate::sng;
 
 const GREEN: Color32 = Color32::from_rgb(40, 190, 70);
 const RED: Color32 = Color32::from_rgb(225, 50, 55);
@@ -26,7 +26,7 @@ const BLUE: Color32 = Color32::from_rgb(50, 120, 235);
 const ORANGE: Color32 = Color32::from_rgb(245, 135, 30);
 const PURPLE: Color32 = Color32::from_rgb(175, 80, 225);
 const STAR: Color32 = Color32::from_rgb(130, 235, 255);
-const SPEEDS: [f32; 6] = [0.25, 0.5, 0.75, 1.0, 1.25, 1.5];
+const SPEEDS: [f32; 7] = [0.1, 0.25, 0.5, 0.75, 1.0, 1.25, 1.5];
 /// How far past the strike line notes stay visible, as a fraction of the highway.
 const BEHIND: f32 = 0.12;
 
@@ -44,12 +44,18 @@ enum SaveStatus {
 
 /// The optimal score for one instrument + difficulty, worked out in the background.
 enum Optimal {
-    Working(Receiver<Option<Outcome>>),
+    /// Being worked out, and how far along (0 to 1000).
+    Working(Receiver<Option<Outcome>>, Arc<AtomicU32>),
     Done(Option<Outcome>),
 }
 
 pub struct Preview {
     title: String,
+    md5: String,
+    /// How far the chart download has got (0 to 1000).
+    load_progress: Arc<AtomicU32>,
+    /// The Close button was clicked (it's in the controls, away from the app window's own ✖).
+    closing: bool,
     state: State,
     inst: u8,
     diff: u8,
@@ -64,6 +70,17 @@ pub struct Preview {
     optimal: HashMap<(u8, u8), Optimal>,
     /// Showing the path chart instead of the highway, and the charts built so far.
     path_view: bool,
+    /// The path chart's zoom (1 = the whole width fits) and the top-left corner shown, in chart units.
+    path_zoom: f32,
+    path_pan: egui::Vec2,
+    /// The section being repeated (index into the song's sections), if repeat is on.
+    repeat: Option<usize>,
+    /// The section the list last scrolled to (it only scrolls when this changes).
+    shown_section: Option<usize>,
+    /// The Clone Hero leaderboard beside the highway.
+    board: crate::leaderboard::Panel,
+    /// The chart, for the leaderboard.
+    chart_info: Chart,
     path_charts: HashMap<(u8, u8), Option<pathchart::Layout>>,
     save_status: Option<SaveStatus>,
     titles: (String, String, String),
@@ -75,14 +92,19 @@ impl Preview {
     pub fn open(client: &Client, c: &Chart, ctx: &egui::Context, inst: Option<u8>, diff: Option<u8>) -> Self {
         let (tx, rx) = channel();
         let (client, chart, ctx) = (client.clone(), c.clone(), ctx.clone());
+        let progress = Arc::new(AtomicU32::new(0));
+        let load_progress = progress.clone();
         thread::spawn(move || {
-            let _ = tx.send(load(&client, &chart).map_err(|e| format!("{e:#}")));
+            let progress = load_progress;
+            let _ = tx.send(load(&client, &chart, &progress).map_err(|e| format!("{e:#}")));
             ctx.request_repaint();
         });
         let inst = inst.filter(|&i| c.diffs[i as usize] >= 0).or_else(|| (0..10).find(|&i| c.diffs[i as usize] >= 0)).unwrap_or(0);
         Self {
             title: format!("{} - {}", c.artist.clone().unwrap_or_else(|| t("Unknown Artist")), c.name.clone().unwrap_or_else(|| t("Unknown"))),
             state: State::Loading(rx),
+            md5: c.md5.clone(),
+            load_progress: progress,
             inst,
             diff: diff.unwrap_or(0),
             time: 0.0,
@@ -93,8 +115,15 @@ impl Preview {
             chart: None,
             optimal: HashMap::new(),
             path_view: false,
+            shown_section: None,
+            repeat: None,
+            path_zoom: 1.0,
+            path_pan: egui::Vec2::ZERO,
+            board: crate::leaderboard::Panel::new(),
+            chart_info: c.clone(),
             path_charts: HashMap::new(),
             save_status: None,
+            closing: false,
             titles: (
                 c.name.clone().unwrap_or_else(|| t("Unknown")),
                 c.artist.clone().unwrap_or_else(|| t("Unknown Artist")),
@@ -110,28 +139,25 @@ impl Preview {
         if !self.optimal.contains_key(&key) {
             let (chart, cutoff) = self.chart.clone()?;
             let (tx, rx) = channel();
-            let ctx = ctx.clone();
+            let (ctx, md5) = (ctx.clone(), self.md5.clone());
+            let progress = Arc::new(AtomicU32::new(0));
+            let shared = progress.clone();
             thread::spawn(move || {
-                let _ = tx.send(optimal::optimise(
-                    &chart,
-                    key.0,
-                    key.1,
-                    cutoff,
-                    optimal::Options::default(),
-                ));
+                let report = |f: f32| shared.store((f * 1000.0) as u32, std::sync::atomic::Ordering::Relaxed);
+                let _ = tx.send(optimal::optimise_cached(&md5, &chart, key.0, key.1, cutoff, &report));
                 ctx.request_repaint();
             });
-            self.optimal.insert(key, Optimal::Working(rx));
+            self.optimal.insert(key, Optimal::Working(rx, progress));
         }
         let entry = self.optimal.get_mut(&key)?;
-        if let Optimal::Working(rx) = entry
+        if let Optimal::Working(rx, _) = entry
             && let Ok(result) = rx.try_recv()
         {
             *entry = Optimal::Done(result);
         }
         match entry {
             Optimal::Done(result) => Some(result.as_ref()),
-            Optimal::Working(_) => None,
+            Optimal::Working(..) => None,
         }
     }
 
@@ -156,23 +182,21 @@ impl Preview {
                 Err(e) => State::Failed(e),
             };
         }
-        let mut open = true;
         let screen = ctx.content_rect();
         let window = egui::Window::new(RichText::new(format!("▶  {}", self.title)).strong())
             .id(egui::Id::new("chart_preview"))
             // Above the blurred backdrop, which sits at the normal window level.
             .order(egui::Order::Foreground)
-            .open(&mut open)
             .default_size([
-                560.0f32.min(screen.width() - 40.0),
+                920.0f32.min(screen.width() - 40.0),
                 680.0f32.min(screen.height() - 60.0),
             ])
-            .default_width(560.0f32.min(screen.width() - 40.0));
+            .default_width(920.0f32.min(screen.width() - 40.0));
         // Pinned to the middle of the whole window (not just the space between panels), so it
         // stays centred as it grows once the chart has loaded.
         let window = window.pivot(egui::Align2::CENTER_CENTER).fixed_pos(screen.center());
         window.min_size([280.0, 360.0]).collapsible(false).show(ctx, |ui| self.contents(ui));
-        open
+        !self.closing
     }
 
     /// Keeps the chosen instrument and difficulty if the song has them, else the nearest that exists.
@@ -191,13 +215,18 @@ impl Preview {
             State::Loading(_) => {
                 ui.vertical_centered(|ui| {
                     ui.add_space(ui.available_height() / 2.0 - 30.0);
-                    ui.spinner();
                     ui.label(t("Downloading the chart…"));
+                    let done = self.load_progress.load(std::sync::atomic::Ordering::Relaxed) as f32 / 1000.0;
+                    ui.add(crate::theme::Bar::new(done).desired_width(240.0).show_percentage().fill(crate::theme::accent()));
+                    ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
+                    ui.add_space(8.0);
+                    self.closing |= ui.button(t("Cancel")).clicked();
                 });
                 return;
             }
             State::Failed(e) => {
                 ui.colored_label(RED, crate::tr!("Couldn't load this chart: {error}", error = e));
+                self.closing |= ui.button(t("Close")).clicked();
                 return;
             }
             State::Ready(_) => {}
@@ -216,6 +245,15 @@ impl Preview {
         if self.playing {
             let dt = self.last_frame.map_or(0.0, |t| (now - t).as_secs_f32());
             self.time += dt.min(0.1) * self.speed;
+            // Repeating a section: back to its start once it's over.
+            if let Some(k) = self.repeat
+                && let Some(&(start, _)) = song.sections.get(k)
+            {
+                let end = song.sections.get(k + 1).map_or(song.end, |s| s.0);
+                if self.time >= end {
+                    self.time = start;
+                }
+            }
             if self.time > song.end + 1.0 {
                 self.playing = false;
             }
@@ -263,8 +301,13 @@ impl Preview {
             let drums = self.inst == crate::api::DRUMS;
             match self.optimal(ui.ctx()) {
                 None => {
-                    ui.spinner();
                     ui.weak(t("Working out the optimal score…"));
+                    let done = match self.optimal.get(&(self.inst, self.diff)) {
+                        Some(Optimal::Working(_, p)) => p.load(std::sync::atomic::Ordering::Relaxed) as f32 / 1000.0,
+                        _ => 0.0,
+                    };
+                    ui.add(crate::theme::Bar::new(done).desired_width(160.0).desired_height(8.0).fill(crate::theme::accent()));
+                    ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
                 }
                 Some(None) => {}
                 Some(Some(o)) => {
@@ -296,7 +339,11 @@ impl Preview {
                         t("Phrases collected before each activation; (+n) are collected during it.")
                     };
                     let tip = format!("{about}\n\n{}", steps.join("\n"));
-                    ui.weak(crate::tr!("Path {path}", path = o.path)).on_hover_text(tip);
+                    // Long paths are cut short to fit (the full one is in the tooltip), so the
+                    // score beside it always stays in view.
+                    let path = crate::tr!("Path {path}", path = o.path);
+                    let tip = format!("{path}\n\n{tip}");
+                    ui.add(egui::Label::new(RichText::new(path).weak()).truncate()).on_hover_text(tip);
                 }
             }
         });
@@ -306,12 +353,23 @@ impl Preview {
             self.path_chart(ui);
             return;
         }
-
         let size = vec2(
             ui.available_width(),
             (ui.available_height() - 62.0).max(200.0),
         );
-        let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
+        // The highway, with the chart's Clone Hero leaderboard beside it when there's room
+        // (on the right, or the left in a right-to-left language).
+        let (full, _) = ui.allocate_exact_size(size, Sense::hover());
+        let board_w = if full.width() >= 620.0 { (full.width() * 0.38).clamp(260.0, 380.0) } else { 0.0 };
+        let gap = if board_w > 0.0 { 8.0 } else { 0.0 };
+        let (rect, board_rect) = if crate::i18n::rtl() {
+            let board = egui::Rect::from_min_size(full.min, vec2(board_w, full.height()));
+            (egui::Rect::from_min_max(egui::pos2(full.left() + board_w + gap, full.top()), full.max), board)
+        } else {
+            let board = egui::Rect::from_min_max(egui::pos2(full.right() - board_w, full.top()), full.max);
+            (egui::Rect::from_min_max(full.min, egui::pos2(full.right() - board_w - gap, full.bottom())), board)
+        };
+        let resp = ui.interact(rect, ui.id().with("highway"), Sense::click());
         if resp.clicked() {
             self.toggle(song.end);
         }
@@ -333,12 +391,57 @@ impl Preview {
                 self.window,
             );
         }
+        // The song's sections, listed down the left of the highway (over it, without taking
+        // space in the layout): the current one highlighted, click one to jump there.
+        if !song.sections.is_empty() {
+            let current = song.sections.iter().rposition(|s| s.0 <= self.time + 0.05);
+            let width = (rect.width() * 0.26).clamp(120.0, 200.0);
+            let area = egui::Rect::from_min_size(rect.min + vec2(8.0, 8.0), vec2(width, rect.height() - 16.0));
+            let mut list = ui.new_child(egui::UiBuilder::new().max_rect(area).layout(egui::Layout::top_down(egui::Align::Min)));
+            list.set_clip_rect(area);
+            egui::ScrollArea::vertical().id_salt("preview_sections").max_height(area.height()).auto_shrink([false, true]).show(&mut list, |ui| {
+                ui.spacing_mut().item_spacing.y = 2.0;
+                for (k, (secs, name)) in song.sections.iter().enumerate() {
+                    let on = current == Some(k);
+                    let text = RichText::new(name).size(12.5);
+                    let text = if on { text.strong().color(Color32::WHITE) } else { text.color(Color32::from_gray(170)) };
+                    let button = egui::Button::new(text)
+                        .fill(if on { crate::theme::accent().linear_multiply(0.85) } else { Color32::from_black_alpha(140) })
+                        .min_size(vec2(width - 12.0, 22.0));
+                    let resp = ui.add(button).on_hover_text(crate::tr!("Jump to {time}", time = clock(*secs)));
+                    // Bring a new current section into view once (not every frame, which shakes).
+                    if on && self.shown_section != current {
+                        resp.scroll_to_me(None);
+                    }
+                    if resp.clicked() {
+                        // Its first notes are already on their way down the highway.
+                        self.time = *secs;
+                        if self.repeat.is_some() {
+                            self.repeat = Some(k);
+                        }
+                    }
+                }
+            });
+            self.shown_section = current;
+        }
+        if board_w > 0.0 {
+            let (c, inst, diff) = (self.chart_info.clone(), self.inst, self.diff);
+            let mut column = ui.new_child(egui::UiBuilder::new().max_rect(board_rect).layout(egui::Layout::top_down(egui::Align::Min)));
+            section(&column).show(&mut column, |ui| {
+                ui.set_width(ui.available_width());
+                ui.set_min_height(board_rect.height() - 16.0);
+                egui::ScrollArea::vertical()
+                    .id_salt("preview_board")
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| self.board.show(ui, &c, Some(inst), Some(diff)));
+            });
+        }
 
         ui.add_space(6.0);
         // Bottom: playback controls on a background.
         section(ui).show(ui, |ui| {
             ui.set_width(ui.available_width());
-            ui.horizontal(|ui| {
+            crate::theme::hrow(ui, |ui| {
                 let icon = if self.playing { "⏸" } else { "▶" };
                 if ui
                     .add(
@@ -354,29 +457,45 @@ impl Preview {
                     RichText::new(format!("{} / {}", clock(self.time), clock(song.end)))
                         .monospace(),
                 );
-                let right = 190.0;
-                ui.spacing_mut().slider_width = (ui.available_width() - right).max(60.0);
-                ui.add(egui::Slider::new(&mut self.time, -1.0..=song.end).show_value(false));
-                egui::ComboBox::from_id_salt("preview_speed")
-                    .selected_text(format!("{}×", self.speed))
-                    .width(64.0)
-                    .show_ui(ui, |ui| {
-                        for s in SPEEDS {
-                            ui.selectable_value(&mut self.speed, s, format!("{s}×"));
+                // From the far end inwards: Close, note speed, playback speed, repeat; the
+                // position slider takes the space left in the middle.
+                ui.with_layout(crate::theme::trailing(), |ui| {
+                    let close = ui.add(egui::Button::new(t("✖  Close")).min_size(vec2(0.0, 28.0)));
+                    self.closing |= close.on_hover_text(t("Close the preview (Esc)")).clicked();
+                    ui.spacing_mut().slider_width = 70.0;
+                    // Note speed: a shorter window makes notes move faster.
+                    let mut note_speed = 3.2 / self.window;
+                    if ui
+                        .add(egui::Slider::new(&mut note_speed, 1.0..=4.0).show_value(false))
+                        .on_hover_text(t("Note speed"))
+                        .changed()
+                    {
+                        self.window = 3.2 / note_speed;
+                    }
+                    egui::ComboBox::from_id_salt("preview_speed")
+                        .selected_text(format!("{}×", self.speed))
+                        .width(64.0)
+                        .show_ui(ui, |ui| {
+                            for s in SPEEDS {
+                                ui.selectable_value(&mut self.speed, s, format!("{s}×"));
+                            }
+                        })
+                        .response
+                        .on_hover_text(t("Playback speed"));
+                    if !song.sections.is_empty() {
+                        let on = self.repeat.is_some();
+                        let repeat = ui.add(egui::Button::new(RichText::new("🔁").size(15.0)).selected(on).min_size(vec2(32.0, 28.0)));
+                        let tip = match self.repeat.and_then(|k| song.sections.get(k)) {
+                            Some((_, name)) => crate::tr!("Repeating {section}", section = name),
+                            None => t("Repeat the current section"),
+                        };
+                        if repeat.on_hover_text(tip).clicked() {
+                            self.repeat = if on { None } else { song.sections.iter().rposition(|s| s.0 <= self.time + 0.05).or(Some(0)) };
                         }
-                    })
-                    .response
-                    .on_hover_text(t("Playback speed"));
-                ui.spacing_mut().slider_width = 70.0;
-                // Note speed: a shorter window makes notes move faster.
-                let mut note_speed = 3.2 / self.window;
-                if ui
-                    .add(egui::Slider::new(&mut note_speed, 1.0..=4.0).show_value(false))
-                    .on_hover_text(t("Note speed"))
-                    .changed()
-                {
-                    self.window = 3.2 / note_speed;
-                }
+                    }
+                    ui.spacing_mut().slider_width = (ui.available_width() - 8.0).max(60.0);
+                    ui.add(egui::Slider::new(&mut self.time, -1.0..=song.end).show_value(false));
+                });
             });
         });
     }
@@ -393,7 +512,7 @@ impl Preview {
             _ => None,
         };
         let Some(outcome) = ready else {
-            ui.horizontal(|ui| {
+            crate::theme::hrow(ui, |ui| {
                 ui.spinner();
                 ui.weak(t("Working out the optimal score…"));
             });
@@ -416,22 +535,62 @@ impl Preview {
             ui.weak(t("There's no path to show for this part"));
             return;
         };
+        // The chart in a viewport: drag to pan, scroll to move up and down, Ctrl+scroll (or
+        // pinch) to zoom around the pointer.
         let footer = 52.0;
-        egui::ScrollArea::vertical()
-            .id_salt("path_chart")
-            .max_height((ui.available_height() - footer).max(120.0))
-            .auto_shrink([false, false])
-            .show(ui, |ui| {
-                let scale = ui.available_width() / pathchart::WIDTH;
-                let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), layout.height * scale), Sense::hover());
-                let painter = ui.painter_at(rect);
-                painter.rect_filled(rect, 0.0, Color32::WHITE);
-                layout.paint(&painter, rect.min, scale);
-            });
+        let size = vec2(ui.available_width(), (ui.available_height() - footer).max(120.0));
+        let (rect, resp) = ui.allocate_exact_size(size, Sense::click_and_drag());
+        let fit = rect.width() / pathchart::WIDTH;
+        let mut scale = fit * self.path_zoom;
+        if resp.hovered() {
+            let (zoom, scroll) = ui.input(|i| (i.zoom_delta(), i.smooth_scroll_delta));
+            if zoom != 1.0 {
+                let pointer = resp.hover_pos().unwrap_or(rect.center());
+                let at = self.path_pan + (pointer - rect.min) / scale; // chart point under the pointer
+                self.path_zoom = (self.path_zoom * zoom).clamp(0.25, 8.0);
+                scale = fit * self.path_zoom;
+                self.path_pan = at - (pointer - rect.min) / scale;
+            } else if scroll != egui::Vec2::ZERO {
+                self.path_pan -= scroll / scale;
+            }
+        }
+        if resp.dragged() {
+            self.path_pan -= resp.drag_delta() / scale;
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+        } else if resp.hovered() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
+        }
+        if resp.double_clicked() {
+            (self.path_zoom, self.path_pan) = (1.0, egui::Vec2::ZERO);
+            scale = fit;
+        }
+        // Keep the chart in view (centred when it's smaller than the viewport).
+        let view = rect.size() / scale;
+        let content = vec2(pathchart::WIDTH, layout.height);
+        for (pan, view, content) in [(&mut self.path_pan.x, view.x, content.x), (&mut self.path_pan.y, view.y, content.y)] {
+            *pan = if content <= view { (content - view) / 2.0 } else { pan.clamp(0.0, content - view) };
+        }
+        let painter = ui.painter_at(rect);
+        painter.rect_filled(rect, 0.0, Color32::from_gray(40));
+        let origin = rect.min - self.path_pan * scale;
+        painter.rect_filled(egui::Rect::from_min_size(origin, content * scale), 0.0, Color32::WHITE);
+        layout.paint(&painter, origin, scale);
         ui.add_space(6.0);
         section(ui).show(ui, |ui| {
             ui.set_width(ui.available_width());
             centered_row(ui, "path_save", |ui| {
+                // Zoom controls.
+                if ui.button("➖").on_hover_text(t("Zoom out (Ctrl+scroll)")).clicked() {
+                    self.path_zoom = (self.path_zoom / 1.25).max(0.25);
+                }
+                ui.label(RichText::new(format!("{:.0}%", self.path_zoom * 100.0)).monospace());
+                if ui.button("➕").on_hover_text(t("Zoom in (Ctrl+scroll)")).clicked() {
+                    self.path_zoom = (self.path_zoom * 1.25).min(8.0);
+                }
+                if ui.button(t("Fit")).on_hover_text(t("Fit the width (or double-click the chart)")).clicked() {
+                    (self.path_zoom, self.path_pan) = (1.0, egui::Vec2::ZERO);
+                }
+                ui.separator();
                 let mut chosen = None;
                 ui.menu_button(t("💾  Save as…"), |ui| {
                     for format in pathchart::Format::ALL {
@@ -496,9 +655,10 @@ pub(crate) struct Loaded {
     pub sustain_cutoff: Option<i64>,
 }
 
-pub(crate) fn load(client: &Client, chart: &Chart) -> anyhow::Result<Loaded> {
-    let data = client.fetch_sng(chart)?;
-    let (ini, file) = sng::read_file(&data, &["notes.chart", "notes.mid"])?;
+/// Downloads (or reads from the cache) a chart's notes; `progress` goes from 0 to 1000.
+pub(crate) fn load(client: &Client, chart: &Chart, progress: &AtomicU32) -> anyhow::Result<Loaded> {
+    let (ini, name, bytes) = client.fetch_notes(chart, progress)?;
+    let file = Some((name, bytes));
     let pro = chart.drum_type == Some(1) || ini_flag(&ini, "pro_drums");
     let mut parsed = match file {
         Some((name, bytes)) if name.ends_with(".mid") => chart::read_midi_chart(&bytes)?,
@@ -558,9 +718,9 @@ fn section(ui: &egui::Ui) -> egui::Frame {
 fn centered_row(ui: &mut egui::Ui, id: &str, add: impl FnOnce(&mut egui::Ui)) {
     let id = ui.id().with(id);
     let width: f32 = ui.ctx().data(|d| d.get_temp(id)).unwrap_or(0.0);
-    ui.horizontal(|ui| {
+    crate::theme::hrow(ui, |ui| {
         ui.add_space(((ui.available_width() - width) / 2.0).max(0.0));
-        let used = ui.horizontal(add).response.rect.width();
+        let used = crate::theme::hrow(ui, add).response.rect.width();
         if (used - width).abs() > 0.5 {
             ui.ctx().data_mut(|d| d.insert_temp(id, used));
             ui.ctx().request_repaint();
@@ -757,7 +917,7 @@ mod tests {
         picks.extend(cat.charts.iter().filter(ok).step_by(9973).take(5));
         let (mut same, mut total) = (0, 0);
         for c in picks {
-            match load(&client, c) {
+            match load(&client, c, &AtomicU32::new(0)) {
                 Err(e) => println!("FAILED {}: {e:#}", c.title()),
                 Ok(Loaded { song, .. }) => {
                     println!("{}", c.title());

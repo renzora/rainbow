@@ -433,11 +433,68 @@ impl Client {
         Ok(md5s)
     }
 
-    /// Downloads a chart's .sng into memory (the no-video version, when there is one).
-    pub fn fetch_sng(&self, chart: &Chart) -> Result<Vec<u8>> {
+    /// A chart's song.ini text and its notes file (name, bytes), for previews and optimal scores.
+    /// Only the .sng's header and notes are downloaded (with range requests, not the audio),
+    /// and they're kept on disk so the chart opens straight away next time. `progress` goes
+    /// from 0 to 1000 as it downloads.
+    pub fn fetch_notes(&self, chart: &Chart, progress: &std::sync::atomic::AtomicU32) -> Result<(String, String, Vec<u8>)> {
+        use std::sync::atomic::Ordering::Relaxed;
+        let dir = crate::catalogue::cache_dir().join("charts");
+        let ini_path = dir.join(format!("{}.ini", chart.md5));
+        for name in ["notes.chart", "notes.mid"] {
+            let path = dir.join(format!("{}.{}", chart.md5, name.trim_start_matches("notes.")));
+            if let (Ok(ini), Ok(bytes)) = (fs::read_to_string(&ini_path), fs::read(&path)) {
+                progress.store(1000, Relaxed);
+                return Ok((ini, name.to_owned(), bytes));
+            }
+        }
         let novideo = if chart.has(flag::VIDEO) { "_novideo" } else { "" };
         let url = format!("{FILES_URL}/{}{novideo}.sng", chart.md5);
-        self.retry(|| Ok(self.check(self.http.get(&url).send()?)?.bytes()?.to_vec()))
+        // A byte range of the file, reporting progress from `from` to `to` (per mille).
+        let fetch = |start: u64, len: u64, from: u32, to: u32| -> Result<Vec<u8>> {
+            self.retry(|| {
+                let resp = self.http.get(&url).header(reqwest::header::RANGE, format!("bytes={start}-{}", start + len.max(1) - 1)).send()?;
+                let partial = resp.status() == StatusCode::PARTIAL_CONTENT;
+                let mut resp = self.check(resp)?;
+                let mut out = Vec::with_capacity(len as usize);
+                let mut buf = [0u8; 64 * 1024];
+                loop {
+                    let n = resp.read(&mut buf)?;
+                    if n == 0 {
+                        break;
+                    }
+                    out.extend_from_slice(&buf[..n]);
+                    progress.store(from + ((to - from) as u64 * (out.len() as u64).min(len) / len.max(1)) as u32, Relaxed);
+                    // A server that ignores the range sends the whole file; stop once we have ours.
+                    if !partial && out.len() as u64 >= start + len {
+                        break;
+                    }
+                }
+                Ok(if partial { out } else { out.get(start as usize..).unwrap_or_default().iter().take(len as usize).copied().collect() })
+            })
+        };
+        let head = fetch(0, 64 * 1024, 0, 100)?;
+        let contents = match sng::contents(&head) {
+            Ok(c) => c,
+            Err(_) => sng::contents(&fetch(0, 8 * 1024 * 1024, 0, 100)?)?,
+        };
+        let Some((name, offset, len)) = ["notes.chart", "notes.mid"]
+            .iter()
+            .find_map(|want| contents.files.iter().find(|f| f.0.eq_ignore_ascii_case(want)))
+        else {
+            anyhow::bail!("it has no notes.chart or notes.mid");
+        };
+        let bytes = contents.unmask(&fetch(*offset as u64, *len as u64, 100, 1000)?);
+        if bytes.len() != *len {
+            anyhow::bail!("couldn't download the notes");
+        }
+        let name = name.to_lowercase();
+        let ini = contents.ini().to_owned();
+        if fs::create_dir_all(&dir).is_ok() {
+            let _ = fs::write(dir.join(format!("{}.{}", chart.md5, name.trim_start_matches("notes."))), &bytes);
+            let _ = fs::write(&ini_path, &ini);
+        }
+        Ok((ini, name, bytes))
     }
 
     /// Downloads a chart into `settings.dir` (as a .sng file or an extracted chart folder,

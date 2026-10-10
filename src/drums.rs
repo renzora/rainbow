@@ -67,14 +67,14 @@ fn in_range(ranges: &[(u32, u32)], tick: u32) -> bool {
 }
 
 /// Works out the optimal score for one difficulty of the drums. None if there are no notes.
-pub fn optimise(chart: &Parsed, diff: u8, opts: Options) -> Option<Outcome> {
+pub fn optimise(chart: &Parsed, diff: u8, opts: Options, progress: &(dyn Fn(f32) + Sync)) -> Option<Outcome> {
     let track = chart.drum_track(diff)?;
     let timing = Timing::new(chart);
     let song = Song::new(chart, &track, &timing, opts);
     if song.points.is_empty() {
         return None;
     }
-    Some(Search::new(&song, &timing).run())
+    Some(Search::new(&song, &timing, progress).run())
 }
 
 /// Which kind of kit the chart is for, from song.ini and then the chart itself.
@@ -319,10 +319,13 @@ struct Search<'a> {
     /// Gems that activate a fill, in order.
     fill_points: Vec<usize>,
     memo: HashMap<(usize, bool), (u64, Option<Edge>)>,
+    /// Progress, from the earliest state finished (they finish from the end backwards).
+    progress: &'a (dyn Fn(f32) + Sync),
+    earliest_done: usize,
 }
 
 impl<'a> Search<'a> {
-    fn new(song: &'a Song, timing: &'a Timing) -> Self {
+    fn new(song: &'a Song, timing: &'a Timing, progress: &'a (dyn Fn(f32) + Sync)) -> Self {
         let mut value_sum = vec![0];
         let mut phrase_sum = vec![0];
         for p in &song.points {
@@ -338,6 +341,8 @@ impl<'a> Search<'a> {
             phrase_points: (0..n).filter(|&i| song.points[i].phrase_end).collect(),
             fill_points: (0..n).filter(|&i| song.points[i].fill.is_some()).collect(),
             memo: HashMap::new(),
+            progress,
+            earliest_done: usize::MAX,
         }
     }
 
@@ -466,6 +471,10 @@ impl<'a> Search<'a> {
             }
         }
         self.memo.insert(state, best);
+        if next < self.earliest_done {
+            self.earliest_done = next;
+            (self.progress)(1.0 - next as f32 / n.max(1) as f32);
+        }
         best.0
     }
 
@@ -618,7 +627,7 @@ mod tests {
             for (line, squeeze) in expected.lines().zip([1.0, 0.0]) {
                 let want: Vec<&str> = line.split_whitespace().collect();
                 let opts = crate::optimal::Options { squeeze, early_whammy: squeeze };
-                let got = super::optimise(&chart, 0, opts).unwrap();
+                let got = super::optimise(&chart, 0, opts, &|_| {}).unwrap();
                 let ok = want == [got.no_sp.to_string().as_str(), &got.total.to_string(), &got.path];
                 bad += !ok as u32;
                 println!(

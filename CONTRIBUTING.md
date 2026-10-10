@@ -39,7 +39,8 @@ step in `.github/workflows/build.yml` for the exact packages.
 | `src/players.rs`, `src/leaderboard.rs`, `src/trackhash/` | Clone Hero players, profiles and leaderboards |
 | `src/rockband.rs`, `src/stfs.rs`, `src/dta.rs` | Converting Rock Band songs |
 | `src/updater.rs` | Updating from GitHub releases |
-| `src/theme.rs`, `src/i18n.rs` | Look and feel, and translations |
+| `src/links.rs`, `docs/c/` | `rainbow://` chart links, and the web page shared links open |
+| `src/theme.rs`, `src/i18n.rs`, `src/flags.rs` | Look and feel, translations (and right-to-left text), language flags |
 | `assets/lang/` | One file per language |
 
 ## Code style

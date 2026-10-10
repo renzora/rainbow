@@ -380,7 +380,7 @@ impl Updates {
                         });
                     }
                     ui.add_space(10.0);
-                    ui.horizontal(|ui| {
+                    crate::theme::hrow(ui, |ui| {
                         install_now = ui.add(theme::primary(t("Install and restart"))).clicked();
                         later = ui.button(t("Later")).clicked();
                         if !r.page.is_empty() && ui.button(t("View on GitHub ↗")).clicked() {
@@ -392,7 +392,7 @@ impl Updates {
                     let (done, total) = *self.progress.lock().unwrap();
                     let frac = total.map_or(0.0, |t| done as f32 / t.max(1) as f32);
                     ui.label(t("Downloading the update…"));
-                    ui.add(egui::ProgressBar::new(frac).show_percentage());
+                    ui.add(crate::theme::Bar::new(frac).show_percentage());
                 }
                 State::Ready(_, exe) => {
                     let exe = exe.clone();
@@ -415,7 +415,7 @@ impl Updates {
 
     /// The Settings card's status line and Check now button.
     pub fn settings(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal_wrapped(|ui| {
+        crate::theme::hrow_wrapped(ui, |ui| {
             ui.label(RichText::new(tr!("Version {version}", version = CURRENT)).strong());
             match &self.state {
                 State::Idle => {}

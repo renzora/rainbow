@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Open in Rainbow</title>
+<meta name="description" content="A Clone Hero chart shared from Rainbow. Opens it in Rainbow.">
+<link rel="icon" href="../icon.png">
+<style>
+  :root {
+    --bg: #12131c; --card: #1c1e2b; --text: #e8e9f0; --weak: #9a9cb0;
+    --accent: #7c54d2; --accent-hover: #9270e0; --line: #2c2f42;
+  }
+  @media (prefers-color-scheme: light) {
+    :root { --bg: #f2f2f7; --card: #ffffff; --text: #1c1d26; --weak: #5f6175; --line: #dcdde6; }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100vh; display: grid; place-items: center; padding: 16px;
+    background: var(--bg); color: var(--text);
+    font: 16px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  main {
+    width: 100%; max-width: 440px; background: var(--card); border: 1px solid var(--line);
+    border-radius: 16px; padding: 28px 24px; text-align: center;
+  }
+  .brand { font-weight: 800; letter-spacing: 0.08em; color: var(--accent-hover); margin: 0 0 18px; }
+  .cover { width: 180px; height: 180px; border-radius: 12px; object-fit: cover; background: var(--line); display: none; margin: 0 auto 16px; }
+  h1 { font-size: 22px; margin: 0 0 4px; }
+  .artist { color: var(--weak); margin: 0 0 4px; }
+  .charter { color: var(--weak); font-size: 14px; margin: 0 0 20px; }
+  .id { font: 13px ui-monospace, Consolas, monospace; color: var(--weak); word-break: break-all; margin: 0 0 20px; }
+  a.button {
+    display: block; padding: 12px 16px; border-radius: 10px; text-decoration: none; font-weight: 600;
+    margin-top: 10px; color: var(--text); border: 1px solid var(--line);
+  }
+  a.button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  a.button.primary:hover { background: var(--accent-hover); }
+  a.button:not(.primary):hover { border-color: var(--accent); }
+  .note { color: var(--weak); font-size: 13px; margin-top: 18px; }
+  .error { color: #e05a5a; }
+</style>
+</head>
+<body>
+<main>
+  <p class="brand">RAINBOW</p>
+  <img class="cover" id="cover" alt="">
+  <h1 id="title">Opening in Rainbow…</h1>
+  <p class="artist" id="artist"></p>
+  <p class="charter" id="charter"></p>
+  <p class="id" id="id"></p>
+  <a class="button primary" id="open" href="#">Open in Rainbow</a>
+  <a class="button" href="https://github.com/renzora/rainbow/releases/latest">Download Rainbow</a>
+  <p class="note">Rainbow searches and downloads Clone Hero charts from Chorus Encore.
+    If nothing happens, install Rainbow and open it once, then try the link again.</p>
+</main>
+<script>
+  // The chart id is the query string: an MD5, or the start of one (?9403b89cc3d2).
+  const id = location.search.replace(/^\?/, "").split(/[&#]/)[0].replace(/^md5=/, "").toLowerCase();
+  const valid = /^[0-9a-f]{8,32}$/.test(id);
+  const $ = (x) => document.getElementById(x);
+  if (!valid) {
+    $("title").textContent = "This link isn't a Rainbow chart link";
+    $("title").classList.add("error");
+    $("open").style.display = "none";
+  } else {
+    const link = "rainbow://" + id;
+    $("open").href = link;
+    $("id").textContent = link;
+    // Try opening Rainbow straight away; the button is there if the browser asks first.
+    setTimeout(() => { location.href = link; }, 300);
+    // A full MD5 can be looked up on Encore to show which chart it is.
+    if (id.length === 32) {
+      fetch("https://api.enchor.us/search/advanced", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ hash: id, per_page: 1, page: 1 }),
+      })
+        .then((r) => r.json())
+        .then((r) => {
+          const c = r.data && r.data[0];
+          if (!c) return;
+          $("title").textContent = c.name || "Unknown song";
+          $("artist").textContent = c.artist || "";
+          $("charter").textContent = c.charter ? "Charted by " + c.charter : "";
+          if (c.albumArtMd5) {
+            $("cover").src = "https://files.enchor.us/" + c.albumArtMd5 + ".jpg";
+            $("cover").style.display = "block";
+          }
+          document.title = (c.name || "Chart") + " – Rainbow";
+        })
+        .catch(() => {});
+    }
+  }
+</script>
+</body>
+</html>

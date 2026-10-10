@@ -97,6 +97,10 @@ pub struct Settings {
     pub scroll_speed: f32,
     /// Cover size in the results table, in points (drag the cover column to change it).
     pub cover_size: f32,
+    /// How the song list is ordered when Rainbow opens.
+    pub default_sort: crate::filter::SortKey,
+    /// The results table's column order, by name (dragged in the header); empty = the usual order.
+    pub column_order: Vec<String>,
     /// Earlier search texts, newest first.
     pub recent_searches: Vec<String>,
     /// Look for a newer Rainbow on GitHub at startup, and install new versions automatically.
@@ -118,6 +122,8 @@ impl Default for Settings {
             delay_secs: 2.0,
             refresh_after_hours: Some(12),
             cover_size: 42.0,
+            default_sort: crate::filter::SortKey::Newest,
+            column_order: Vec::new(),
             recent_searches: Vec::new(),
             check_updates: true,
             auto_update: false,

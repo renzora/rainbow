@@ -77,6 +77,13 @@ jobs:
             <key>CFBundleVersion</key><string>$VERSION</string>
             <key>LSMinimumSystemVersion</key><string>11.0</string>
             <key>NSHighResolutionCapable</key><true/>
+            <key>CFBundleURLTypes</key>
+            <array>
+              <dict>
+                <key>CFBundleURLName</key><string>Rainbow chart link</string>
+                <key>CFBundleURLSchemes</key><array><string>rainbow</string></array>
+              </dict>
+            </array>
           </dict>
           </plist>
           EOF

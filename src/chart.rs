@@ -56,6 +56,8 @@ pub struct Track {
 
 pub struct Song {
     pub tracks: Vec<Track>,
+    /// Practice sections (seconds, name), e.g. "Intro", "Verse 1", "Guitar Solo".
+    pub sections: Vec<(f32, String)>,
     /// Beat lines: time and whether it starts a measure.
     pub beats: Vec<(f32, bool)>,
     pub end: f32,
@@ -75,6 +77,8 @@ pub struct Parsed {
     pub tempos: Vec<(u32, f64)>,
     /// (tick, numerator, denominator), in file order.
     pub sigs: Vec<(u32, u32, u32)>,
+    /// Practice sections (tick, name).
+    pub sections: Vec<(u32, String)>,
     raws: Vec<(u8, u8, Raw)>,
     /// song.ini's `pro_drums` and `five_lane_drums`, if set (the caller fills these in).
     pub pro_drums: Option<bool>,
@@ -122,7 +126,9 @@ impl Parsed {
     /// The falling-notes view of every track.
     pub fn song(&self, pro_drums: bool) -> Result<Song> {
         let tempo = TempoMap::new(self.res, self.tempos.clone());
-        build(self.raws.clone(), self.res, pro_drums, &tempo, &self.sigs)
+        let mut song = build(self.raws.clone(), self.res, pro_drums, &tempo, &self.sigs)?;
+        song.sections = self.sections.iter().map(|(tick, name)| (tempo.secs(*tick), name.clone())).collect();
+        Ok(song)
     }
 
     pub fn track(&self, inst: u8, diff: u8) -> Option<TickTrack> {
@@ -217,6 +223,21 @@ pub fn time_signatures(sigs: &[(u32, u32, u32)]) -> Vec<(u32, u32, u32)> {
         out.insert(0, (0, 4, 4));
     }
     out
+}
+
+/// A practice section's display name from an event like "section Verse 1", "[section intro]"
+/// or "[prc_gtr_solo_a]".
+fn section_name(text: &str) -> Option<String> {
+    let t = text.trim().trim_start_matches('[').trim_end_matches(']').trim();
+    let raw = t.strip_prefix("section").or_else(|| t.strip_prefix("prc_"))?;
+    let name = raw.trim_start_matches(['_', ' ']).replace('_', " ");
+    let name = name.trim();
+    if name.is_empty() {
+        return None;
+    }
+    // Rock Band's lower-case names read better with a capital.
+    let mut c = name.chars();
+    Some(c.next().map(|f| f.to_uppercase().collect::<String>() + c.as_str()).unwrap_or_default())
 }
 
 /// Sorts ranges and trims each one to end where the next begins.
@@ -418,6 +439,7 @@ pub fn read_chart(text: &str) -> Parsed {
     let mut raws: Vec<(u8, u8, Raw)> = Vec::new();
     let mut solo_starts: Vec<u32> = Vec::new();
     let mut flip_start: Option<u32> = None;
+    let mut sections = Vec::new();
     let mut section = String::new();
     for line in text.lines() {
         let line = line.trim().trim_start_matches('\u{feff}');
@@ -435,6 +457,13 @@ pub fn read_chart(text: &str) -> Parsed {
         let mut words = value.split_whitespace();
         match section.as_str() {
             "Song" if key == "Resolution" => res = value.parse().unwrap_or(192).max(1),
+            "Events" => {
+                if let (Ok(tick), Some(text)) = (key.parse::<u32>(), value.strip_prefix('E'))
+                    && let Some(name) = section_name(text.trim().trim_matches('"'))
+                {
+                    sections.push((tick, name));
+                }
+            }
             "SyncTrack" => {
                 let Ok(tick) = key.parse::<u32>() else {
                     continue;
@@ -536,10 +565,12 @@ pub fn read_chart(text: &str) -> Parsed {
     for (_, _, raw) in &mut raws {
         clip_overlaps(&mut raw.solos);
     }
+    sections.sort_by_key(|s| s.0);
     Parsed {
         res,
         tempos,
         sigs,
+        sections,
         raws,
         pro_drums: None,
         five_lane_drums: None,
@@ -571,7 +602,7 @@ fn build(
         bail!("the chart has no playable notes");
     }
     let end = tracks.iter().flat_map(|t| t.notes.iter().map(|n| n.end)).fold(0.0, f32::max);
-    Ok(Song { beats: beat_lines(res, sigs, last_tick, tempo), tracks, end })
+    Ok(Song { beats: beat_lines(res, sigs, last_tick, tempo), tracks, sections: Vec::new(), end })
 }
 
 // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ .mid â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -750,6 +781,13 @@ pub fn read_midi_chart(data: &[u8]) -> Result<Parsed> {
             }
         }
     }
+    let mut sections: Vec<(u32, String)> = tracks
+        .iter()
+        .filter(|events| events.iter().any(|(_, e)| matches!(e, Ev::Name(n) if n.trim() == "EVENTS")))
+        .flatten()
+        .filter_map(|(tick, e)| if let Ev::Text(t) = e { section_name(t).map(|n| (*tick, n)) } else { None })
+        .collect();
+    sections.sort_by_key(|s| s.0);
     // Fills from the [coda] on are a big rock ending, not a place to activate star power.
     let coda = tracks
         .iter()
@@ -876,6 +914,7 @@ pub fn read_midi_chart(data: &[u8]) -> Result<Parsed> {
         res,
         tempos,
         sigs,
+        sections,
         raws,
         pro_drums: None,
         five_lane_drums: None,

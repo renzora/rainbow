@@ -43,7 +43,7 @@ impl Default for Options {
 }
 
 /// One star power activation on the best path.
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct Activation {
     /// Phrases collected since the previous activation, and during this one.
     pub phrases_before: u32,
@@ -62,7 +62,7 @@ pub struct Activation {
 }
 
 /// One scoring point (a note or chord, or sustain points), for drawing the path.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub struct ScorePoint {
     pub beat: f64,
     /// Points before the combo multiplier, and after it (without star power).
@@ -74,6 +74,7 @@ pub struct ScorePoint {
     pub activation: Option<usize>,
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Outcome {
     /// Every note hit, with no star power (includes solo bonuses).
     pub no_sp: u64,
@@ -90,6 +91,7 @@ pub struct Outcome {
 /// Works out the optimal score for one instrument and difficulty (five-fret or GHL guitar,
 /// bass, rhythm, keys, and drums, which have their own rules in `drums.rs`). `sustain_cutoff` is song.ini's `sustain_cutoff_threshold`, if any.
 /// Returns None if the track has no notes.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn optimise(
     chart: &Parsed,
     inst: u8,
@@ -97,8 +99,49 @@ pub fn optimise(
     sustain_cutoff: Option<i64>,
     opts: Options,
 ) -> Option<Outcome> {
+    optimise_with_progress(chart, inst, diff, sustain_cutoff, opts, &|_| {})
+}
+
+/// Bump when results change, so results saved on disk by an older version aren't used.
+const CACHE_VERSION: u32 = 1;
+
+/// `optimise` with default options, kept on disk by chart md5 so it's only worked out once.
+/// `progress` is told how far along it is (0.0 to 1.0) when it does have to work it out.
+pub fn optimise_cached(
+    md5: &str,
+    chart: &Parsed,
+    inst: u8,
+    diff: u8,
+    sustain_cutoff: Option<i64>,
+    progress: &(dyn Fn(f32) + Sync),
+) -> Option<Outcome> {
+    let dir = crate::catalogue::cache_dir().join("optimal");
+    let path = dir.join(format!("{md5}_{inst}_{diff}_v{CACHE_VERSION}.json"));
+    if let Ok(saved) = std::fs::read(&path)
+        && let Ok(outcome) = serde_json::from_slice::<Option<Outcome>>(&saved)
+    {
+        return outcome;
+    }
+    let outcome = optimise_with_progress(chart, inst, diff, sustain_cutoff, Options::default(), progress);
+    if std::fs::create_dir_all(&dir).is_ok()
+        && let Ok(json) = serde_json::to_vec(&outcome)
+    {
+        let _ = std::fs::write(&path, json);
+    }
+    outcome
+}
+
+/// `optimise`, telling `progress` how far along the search is (0.0 to 1.0, roughly).
+pub fn optimise_with_progress(
+    chart: &Parsed,
+    inst: u8,
+    diff: u8,
+    sustain_cutoff: Option<i64>,
+    opts: Options,
+    progress: &(dyn Fn(f32) + Sync),
+) -> Option<Outcome> {
     if inst == 4 {
-        return crate::drums::optimise(chart, diff, opts);
+        return crate::drums::optimise(chart, diff, opts, progress);
     }
     let track = chart.track(inst, diff)?;
     let timing = Timing::new(chart);
@@ -106,7 +149,7 @@ pub fn optimise(
     if song.points.is_empty() {
         return None;
     }
-    Some(Search::new(&song, &timing).run())
+    Some(Search::new(&song, &timing, progress).run())
 }
 
 // ─────────────────────────────── Timing ───────────────────────────────
@@ -744,10 +787,14 @@ struct Search<'a> {
     /// activation: a phrase's last note, or a sustain point while whammy is possible.
     next_relevant: Vec<usize>,
     memo: HashMap<State, (u64, Option<Edge>)>,
+    /// Progress: states finish from the end of the song backwards, so the earliest finished one
+    /// says roughly how much is done.
+    progress: &'a (dyn Fn(f32) + Sync),
+    earliest_done: usize,
 }
 
 impl<'a> Search<'a> {
-    fn new(song: &'a Scored, timing: &'a Timing) -> Self {
+    fn new(song: &'a Scored, timing: &'a Timing, progress: &'a (dyn Fn(f32) + Sync)) -> Self {
         let mut value_sum = vec![0];
         let mut phrase_sum = vec![0];
         for p in &song.points {
@@ -794,6 +841,8 @@ impl<'a> Search<'a> {
             phrase_windows,
             next_relevant,
             memo: HashMap::new(),
+            progress,
+            earliest_done: usize::MAX,
         }
     }
 
@@ -1135,6 +1184,10 @@ impl<'a> Search<'a> {
             }
         }
         self.memo.insert(state, best);
+        if state.next < self.earliest_done {
+            self.earliest_done = state.next;
+            (self.progress)(1.0 - state.next as f32 / n.max(1) as f32);
+        }
         if cfg!(test) && self.memo.len() % 2000 == 0 {
             eprintln!("  {} states", self.memo.len());
         }

@@ -1,17 +1,36 @@
 //! Google-style search box syntax: `"exact phrase"`, `-exclude`, and `field:value` filters
-//! like `artist:queen`, `year:1990..1999`, `length:>5` or `has:lyrics`.
+//! like `artist:queen`, `year:1990..1999`, `length:>5`, `notes:>1000` or `has:lyrics`. Keys have
+//! short forms (`a:`, `ch:`, `y:`, `d:`...), and a space after the colon is fine: after
+//! `artist: the killers` the value runs on to the next key.
 
 use crate::api::{Chart, INSTRUMENTS, flag};
 
 /// Text fields as indexed by `filter::Index` (name, artist, album, genre, year, charter).
 const FIELDS: [(&[&str], usize); 6] = [
-    (&["name", "song", "title"], 0),
-    (&["artist", "band"], 1),
-    (&["album"], 2),
-    (&["genre"], 3),
-    (&["year"], 4),
-    (&["charter", "author", "by"], 5),
+    (&["name", "song", "title", "n", "s"], 0),
+    (&["artist", "band", "a"], 1),
+    (&["album", "al"], 2),
+    (&["genre", "g"], 3),
+    (&["year", "y"], 4),
+    (&["charter", "author", "by", "ch", "c"], 5),
 ];
+
+/// The other keys (and their short forms), as `understand` reads them.
+const KEYS: [&str; 22] = [
+    "length", "len", "minutes", "l", "diff", "difficulty", "intensity", "d", "has", "is", "with", "inst",
+    "instrument", "plays", "i", "drums", "drumtype", "type", "notes", "nc", "user", "u",
+];
+
+fn known_key(k: &str) -> bool {
+    let k = k.to_lowercase();
+    KEYS.contains(&k.as_str()) || FIELDS.iter().any(|(names, _)| names.contains(&k.as_str()))
+}
+
+/// Keys whose value is text, which can be several words after "key: ".
+fn text_key(k: &str) -> bool {
+    let k = k.to_lowercase();
+    k != "year" && k != "y" && (matches!(k.as_str(), "user" | "u") || FIELDS.iter().any(|(names, _)| names.contains(&k.as_str())))
+}
 
 /// `has:` / `is:` words and the chart flag each means.
 const FLAGS: [(&[&str], u16); 12] = [
@@ -60,6 +79,10 @@ pub enum Cond {
     Flag(u16),
     /// Drum type (index into `DRUM_TYPES`).
     DrumType(u8),
+    /// Note count on the picked instrument and difficulty (or any).
+    Notes(Bounds),
+    /// Charts a Clone Hero player has played (by username), matched by the caller.
+    User(String),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -92,6 +115,7 @@ fn tokens(q: &str) -> Vec<Token<'_>> {
         }
         // A key is letters/digits right before a colon, then something other than "//" (so links stay words).
         let mut key = None;
+        let mut spaced = false;
         if let Some(colon) = rest.find(':') {
             let k = &rest[..colon];
             if !k.is_empty()
@@ -100,6 +124,12 @@ fn tokens(q: &str) -> Vec<Token<'_>> {
             {
                 key = Some(k);
                 rest = &rest[colon + 1..];
+                // "key: value" (a known key with a space after the colon) means "key:value".
+                let after = rest.trim_start();
+                if after.len() < rest.len() && !after.is_empty() && known_key(k) {
+                    rest = after;
+                    spaced = true;
+                }
             }
         }
         let (value, quoted) = if let Some(inner) = rest.strip_prefix('"') {
@@ -108,6 +138,21 @@ fn tokens(q: &str) -> Vec<Token<'_>> {
             let v = inner[..end].to_owned();
             rest = inner.get(end + 1..).unwrap_or("");
             (v, true)
+        } else if spaced && key.is_some_and(text_key) {
+            // Words up to the next key or exclusion: "artist: the killers year:2004".
+            let mut end = 0;
+            for (i, word) in word_spans(rest) {
+                let is_key = word
+                    .split_once(':')
+                    .is_some_and(|(k, _)| !k.is_empty() && k.chars().all(|c| c.is_ascii_alphanumeric()));
+                if end > 0 && (is_key || word.starts_with('-')) {
+                    break;
+                }
+                end = i + word.len();
+            }
+            let v = rest[..end].to_owned();
+            rest = &rest[end..];
+            (v, false)
         } else {
             let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
             let v = rest[..end].to_owned();
@@ -123,6 +168,11 @@ fn tokens(q: &str) -> Vec<Token<'_>> {
             raw,
         });
     }
+}
+
+/// Each whitespace-separated word with its byte offset.
+fn word_spans(s: &str) -> impl Iterator<Item = (usize, &str)> {
+    s.split_whitespace().map(move |w| (w.as_ptr() as usize - s.as_ptr() as usize, w))
 }
 
 /// Numbers like `2000`, `1990..1999`, `1990-1999`, `>5`, `<=3`, and decades like `1990s`.
@@ -193,7 +243,7 @@ fn drum_type(word: &str) -> Option<u8> {
 fn understand(key: &str, value: &str, quoted: bool) -> Option<Cond> {
     let v = value.to_lowercase();
     let key = key.to_lowercase();
-    if key == "year"
+    if (key == "year" || key == "y")
         && let Some(b) = bounds(&v)
     {
         return Some(Cond::Year(b));
@@ -209,14 +259,16 @@ fn understand(key: &str, value: &str, quoted: bool) -> Option<Cond> {
         });
     }
     match key.as_str() {
-        "length" | "len" | "minutes" => bounds(&v).map(Cond::Length),
-        "diff" | "difficulty" | "intensity" => bounds(&v).map(Cond::Diff),
+        "length" | "len" | "minutes" | "l" => bounds(&v).map(Cond::Length),
+        "diff" | "difficulty" | "intensity" | "d" => bounds(&v).map(Cond::Diff),
+        "notes" | "nc" => bounds(&v).map(Cond::Notes),
+        "user" | "u" => (!v.trim().is_empty()).then(|| Cond::User(v.trim().to_owned())),
         "has" | "is" | "with" => FLAGS
             .iter()
             .find(|(names, _)| names.contains(&v.as_str()))
             .map(|(_, f)| Cond::Flag(*f))
             .or_else(|| instrument(&v).map(Cond::Instrument)),
-        "inst" | "instrument" | "plays" => instrument(&v).map(Cond::Instrument),
+        "inst" | "instrument" | "plays" | "i" => instrument(&v).map(Cond::Instrument),
         "drums" | "drumtype" | "type" => drum_type(&v).map(Cond::DrumType),
         _ => None,
     }
@@ -285,10 +337,15 @@ pub fn whole_words(hay: &str, needle: &str) -> bool {
     })
 }
 
-/// Checks the non-text conditions against a chart. `instrument` is the one picked in the bar.
-pub fn matches_chart(cond: &Cond, c: &Chart, instrument: Option<u8>) -> bool {
+/// Checks the non-text conditions against a chart. `instrument` and `difficulty` are the ones
+/// picked in the bar.
+pub fn matches_chart(cond: &Cond, c: &Chart, instrument: Option<u8>, difficulty: Option<u8>) -> bool {
     match *cond {
-        Cond::Text { .. } => unreachable!("text is matched against the index"),
+        Cond::Text { .. } | Cond::User(_) => unreachable!("text and players are matched by the caller"),
+        Cond::Notes(b) => c
+            .notes
+            .iter()
+            .any(|s| instrument.is_none_or(|i| s.i == i) && difficulty.is_none_or(|d| s.d == d) && b.contains(s.n as f64)),
         Cond::Year(b) => c
             .year
             .as_deref()
@@ -373,6 +430,27 @@ mod tests {
             conds,
             vec![Cond::Instrument(4), Cond::DrumType(1), Cond::Instrument(3)]
         );
+    }
+
+    #[test]
+    fn spaces_after_colons_and_short_keys() {
+        let (terms, words) = parse("artist: the killers y: 2004 length: >3 ch:nadxa notes:>1000 u: nadx mr");
+        let conds: Vec<Cond> = terms.into_iter().map(|t| t.cond).collect();
+        assert_eq!(
+            conds,
+            vec![
+                text(Some(1), "the killers", false),
+                Cond::Year(Bounds { min: Some(2004.0), max: Some(2004.0) }),
+                Cond::Length(Bounds { min: Some(3.0 + 1e-9), max: None }),
+                text(Some(5), "nadxa", false),
+                Cond::Notes(Bounds { min: Some(1000.0 + 1e-9), max: None }),
+                Cond::User("nadx mr".to_owned()),
+            ]
+        );
+        assert!(words.is_empty());
+        // Unknown keys keep the space: "AC/DC: back" stays two words.
+        let (_, words) = parse("ac/dc: back");
+        assert_eq!(words, ["ac/dc:", "back"]);
     }
 
     #[test]

@@ -71,10 +71,12 @@ fn within((min, max): (Option<f64>, Option<f64>), v: f64) -> bool {
     min.is_none_or(|m| v >= m) && max.is_none_or(|m| v <= m)
 }
 
-#[derive(Clone, Copy, PartialEq, Default)]
+#[derive(Clone, Copy, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub enum SortKey {
     #[default]
     Newest,
+    /// Most played on Clone Hero (its top 100 songs, in `Filters::popular`), then newest.
+    Popular,
     Name,
     Artist,
     Album,
@@ -106,6 +108,11 @@ pub struct Filters {
     /// Comma-separated track hashes; resolved to md5s by the server (see `track_md5s`).
     pub track_hash: String,
     pub track_md5s: Option<HashSet<String>>,
+    /// For `user:` searches, each looked-up player's charts (name, artist, charter, lower case),
+    /// by the lower-case name searched for; filled in by the app as lookups finish.
+    pub played: std::collections::BTreeMap<String, Vec<(String, String, String)>>,
+    /// Clone Hero's most played songs, most first (name, artist, lower case), for that sort.
+    pub popular: Vec<(String, String)>,
     pub toggles: [Option<bool>; 11],
 
     // Quick options.
@@ -235,7 +242,11 @@ impl Index {
                                 hay.contains(value.as_str())
                             }
                         }
-                        cond => query::matches_chart(cond, c, f.instrument),
+                        // A player's charts: same name and artist (and charter, when known).
+                        Cond::User(name) => f.played.get(&name.to_lowercase()).is_some_and(|charts| {
+                            charts.iter().any(|(n, a, ch)| *n == fields[0] && *a == fields[1] && (ch.is_empty() || *ch == fields[5]))
+                        }),
+                        cond => query::matches_chart(cond, c, f.instrument, f.difficulty),
                     };
                     if hit == term.negate {
                         return false;
@@ -244,6 +255,7 @@ impl Index {
                 if !(query_hashes.is_empty() && drive_ids.is_empty()) {
                     let hash_hit = query_hashes.iter().any(|h| {
                         c.md5 == *h
+                            || (h.len() < 32 && c.md5.starts_with(h.as_str()))
                             || c.chart_hash
                                 .as_ref()
                                 .is_some_and(|ch| ch.eq_ignore_ascii_case(h))
@@ -332,10 +344,14 @@ impl Index {
                 None => c.diffs.iter().copied().max().unwrap_or(-1),
             };
             let key = |i: usize| -> &str { &self.fields[i][sort_field(f.sort)] };
+            let popular: HashMap<(&str, &str), usize> =
+                f.popular.iter().enumerate().map(|(k, (n, a))| ((n.as_str(), a.as_str()), k)).collect();
+            let rank = |i: usize| popular.get(&(self.fields[i][0].as_str(), self.fields[i][1].as_str())).copied().unwrap_or(usize::MAX);
             out.sort_by(|&a, &b| {
                 let (ca, cb) = (&charts[a], &charts[b]);
                 let ord = match f.sort {
                     SortKey::Newest => a.cmp(&b),
+                    SortKey::Popular => rank(a).cmp(&rank(b)),
                     SortKey::Length => ca.length().cmp(&cb.length()),
                     SortKey::Difficulty => diff(ca).cmp(&diff(cb)),
                     SortKey::Uploaded => ca.modified.cmp(&cb.modified),
@@ -364,6 +380,10 @@ pub fn hash_in(word: &str) -> Option<String> {
     let is_hash = |s: &str| s.len() >= 32 && s.bytes().all(|b| b.is_ascii_hexdigit());
     if is_hash(word) {
         return Some(word.to_lowercase());
+    }
+    // Rainbow's own links (rainbow:// or the web page) can have just the start of an MD5.
+    if let Some(id) = crate::links::chart_id(word) {
+        return Some(id);
     }
     if !word.to_lowercase().contains("enchor.us") {
         return None;
@@ -442,6 +462,8 @@ mod tests {
             hash_in(&format!("enchor.us/chart/{md5}?instrument=guitar")).as_deref(),
             Some(md5)
         );
+        assert_eq!(hash_in("rainbow://2cc7370c95d1").as_deref(), Some("2cc7370c95d1"));
+        assert_eq!(hash_in("https://renzora.github.io/rainbow/c/?2cc7370c95d1").as_deref(), Some("2cc7370c95d1"));
         assert_eq!(hash_in("metallica"), None);
         assert_eq!(
             hash_in("https://example.com/2cc7370c95d16a1b2701bfabca131add"),

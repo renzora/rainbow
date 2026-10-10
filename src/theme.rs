@@ -1,5 +1,6 @@
 //! Rainbow's look: colour themes, rounded widgets, roomier spacing, and a few custom widgets.
 
+use crate::n;
 use std::sync::RwLock;
 
 use eframe::egui::{self, Color32, CornerRadius, FontId, Stroke, TextStyle, Visuals};
@@ -223,14 +224,14 @@ impl ThemeKind {
 
     pub fn name(self) -> &'static str {
         match self {
-            ThemeKind::Midnight => "Midnight",
-            ThemeKind::Daylight => "Daylight",
-            ThemeKind::Hotel => "Hotel",
-            ThemeKind::Synthwave => "Synthwave",
-            ThemeKind::Ocean => "Ocean",
-            ThemeKind::Forest => "Forest",
-            ThemeKind::Sunset => "Sunset",
-            ThemeKind::HighContrast => "High contrast",
+            ThemeKind::Midnight => n("Midnight"),
+            ThemeKind::Daylight => n("Daylight"),
+            ThemeKind::Hotel => n("Hotel"),
+            ThemeKind::Synthwave => n("Synthwave"),
+            ThemeKind::Ocean => n("Ocean"),
+            ThemeKind::Forest => n("Forest"),
+            ThemeKind::Sunset => n("Sunset"),
+            ThemeKind::HighContrast => n("High contrast"),
         }
     }
 
@@ -290,6 +291,8 @@ pub fn apply(ctx: &egui::Context, kind: ThemeKind, zoom: f32, access: Access) {
     ctx.set_zoom_factor(zoom);
     ctx.style_mut_of(theme, |s| {
         style(s, &pal);
+        // Long enough to see sections slide open and switches slide across.
+        s.animation_time = 0.2;
         if access.reduce_motion {
             s.animation_time = 0.0;
             s.scroll_animation = egui::style::ScrollAnimation::none();
@@ -444,20 +447,136 @@ pub fn scrollbar(ui: &mut egui::Ui, track: egui::Rect, id: egui::Id, offset: f32
     new_offset
 }
 
+/// A row of widgets: left to right, or right to left when the interface language is written
+/// that way (Arabic). Use instead of `ui.horizontal`.
+pub fn hrow<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> egui::InnerResponse<R> {
+    if crate::i18n::rtl() {
+        // Like `ui.horizontal`: one row tall (it grows to fit), not the whole space left.
+        let size = egui::vec2(ui.available_size_before_wrap().x, ui.spacing().interact_size.y);
+        ui.allocate_ui_with_layout(size, egui::Layout::right_to_left(egui::Align::Center), add)
+    } else {
+        ui.horizontal(add)
+    }
+}
+
+/// Like [`hrow`], wrapping onto more lines when it's too wide (`ui.horizontal_wrapped`).
+pub fn hrow_wrapped<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> egui::InnerResponse<R> {
+    if crate::i18n::rtl() {
+        let size = egui::vec2(ui.available_size_before_wrap().x, ui.spacing().interact_size.y);
+        ui.allocate_ui_with_layout(size, egui::Layout::right_to_left(egui::Align::Center).with_main_wrap(true), add)
+    } else {
+        ui.horizontal_wrapped(add)
+    }
+}
+
+/// A column of widgets lined up on the left, or on the right in a right-to-left language. Use
+/// instead of `ui.vertical`.
+pub fn vcol<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> egui::InnerResponse<R> {
+    let align = if crate::i18n::rtl() { egui::Align::Max } else { egui::Align::Min };
+    ui.scope_builder(egui::UiBuilder::new().layout(egui::Layout::top_down(align)), add)
+}
+
+/// A progress bar that fills from the start of the line: egui's own, or in a right-to-left
+/// language drawn here filling from the right. Built like `egui::ProgressBar`.
+pub struct Bar {
+    progress: f32,
+    width: Option<f32>,
+    height: Option<f32>,
+    text: Option<String>,
+    percent: bool,
+    fill: Option<Color32>,
+}
+
+impl Bar {
+    pub fn new(progress: f32) -> Self {
+        Self { progress: progress.clamp(0.0, 1.0), width: None, height: None, text: None, percent: false, fill: None }
+    }
+    pub fn desired_width(mut self, w: f32) -> Self {
+        self.width = Some(w);
+        self
+    }
+    pub fn desired_height(mut self, h: f32) -> Self {
+        self.height = Some(h);
+        self
+    }
+    pub fn text(mut self, text: impl Into<String>) -> Self {
+        self.text = Some(text.into());
+        self
+    }
+    pub fn show_percentage(mut self) -> Self {
+        self.percent = true;
+        self
+    }
+    pub fn fill(mut self, color: Color32) -> Self {
+        self.fill = Some(color);
+        self
+    }
+}
+
+impl egui::Widget for Bar {
+    fn ui(self, ui: &mut egui::Ui) -> egui::Response {
+        if !crate::i18n::rtl() {
+            let mut bar = egui::ProgressBar::new(self.progress);
+            if let Some(w) = self.width {
+                bar = bar.desired_width(w);
+            }
+            if let Some(h) = self.height {
+                bar = bar.desired_height(h);
+            }
+            if let Some(text) = self.text {
+                bar = bar.text(text);
+            }
+            if self.percent {
+                bar = bar.show_percentage();
+            }
+            if let Some(c) = self.fill {
+                bar = bar.fill(c);
+            }
+            return ui.add(bar);
+        }
+        let height = self.height.unwrap_or(ui.spacing().interact_size.y);
+        let width = self.width.unwrap_or(ui.available_size_before_wrap().x);
+        let (rect, resp) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::hover());
+        let radius = CornerRadius::same((height / 2.0).min(255.0) as u8);
+        let visuals = ui.visuals();
+        ui.painter().rect_filled(rect, radius, visuals.extreme_bg_color);
+        let filled = egui::Rect::from_min_max(egui::pos2(rect.right() - rect.width() * self.progress, rect.top()), rect.max);
+        if self.progress > 0.0 {
+            ui.painter().rect_filled(filled, radius, self.fill.unwrap_or(visuals.selection.bg_fill));
+        }
+        let text = self.text.or_else(|| self.percent.then(|| format!("{}%", (self.progress * 100.0).round())));
+        if let Some(text) = text {
+            // Right-aligned inside the bar, the way egui left-aligns it.
+            let at = egui::pos2(rect.right() - 6.0, rect.center().y);
+            ui.painter().text(at, egui::Align2::RIGHT_CENTER, text, FontId::proportional((height * 0.6).clamp(9.0, 14.0)), visuals.text_color());
+        }
+        resp
+    }
+}
+
+/// The layout for things pushed to the far end of a row (the right, or the left in a
+/// right-to-left language).
+pub fn trailing() -> egui::Layout {
+    if crate::i18n::rtl() { egui::Layout::left_to_right(egui::Align::Center) } else { egui::Layout::right_to_left(egui::Align::Center) }
+}
+
 /// A filled accent button for primary actions.
 pub fn primary(text: impl Into<String>) -> egui::Button<'static> {
     egui::Button::new(egui::RichText::new(text.into()).color(on_accent()).strong()).fill(accent())
 }
 
-/// "Rainbow" in the Rainbow Rounded face with a soft pink, lavender and sky-blue gradient across it.
-pub fn title(size: f32) -> egui::text::LayoutJob {
-    const STOPS: [Color32; 3] = [rgb(255, 128, 182), rgb(184, 146, 255), rgb(112, 196, 255)];
+/// "Rainbow" in the Rainbow Rounded face with a soft pink, lavender and sky-blue gradient across
+/// it. `phase` (0..1, wrapping) slides the gradient along, for a gentle animation.
+pub fn title(size: f32, phase: f32) -> egui::text::LayoutJob {
+    // A loop of colours (back to the first), so sliding it along never jumps.
+    const STOPS: [Color32; 4] = [rgb(255, 128, 182), rgb(184, 146, 255), rgb(112, 196, 255), rgb(255, 128, 182)];
     let mut job = egui::text::LayoutJob::default();
     let font = FontId::new(size, egui::FontFamily::Name(UiFont::Rounded.key().into()));
     let letters: Vec<char> = "RAINBOW".chars().collect();
     for (i, ch) in letters.iter().enumerate() {
-        // Position along the word (0..1), blended between the two nearest stops.
-        let p = i as f32 / (letters.len() - 1) as f32 * (STOPS.len() - 1) as f32;
+        // Position along the word, over two thirds of the loop, moved by the phase.
+        let at = (i as f32 / (letters.len() - 1) as f32 * 0.66 + phase).rem_euclid(1.0);
+        let p = at * (STOPS.len() - 1) as f32;
         let k = (p.floor() as usize).min(STOPS.len() - 2);
         let color = STOPS[k].lerp_to_gamma(STOPS[k + 1], p - k as f32);
         job.append(&ch.to_string(), 0.0, egui::TextFormat { font_id: font.clone(), color, ..Default::default() });
@@ -538,6 +657,8 @@ pub fn install_fonts(ctx: &egui::Context, choice: UiFont, language: &str) {
         ("noto-sans-kr", &include_bytes!("../assets/fonts/NotoSansKR-UI.ttf")[..]),
         ("noto-sans-sc", &include_bytes!("../assets/fonts/NotoSansSC-UI.ttf")[..]),
         ("noto-sans-tc", &include_bytes!("../assets/fonts/NotoSansTC-UI.ttf")[..]),
+        // Arabic, including the joined letter forms the right-to-left text is drawn with.
+        ("noto-sans-arabic", &include_bytes!("../assets/fonts/NotoSansArabic.ttf")[..]),
         ("rainbow-rounded", &include_bytes!("../assets/fonts/RainbowRounded.ttf")[..]),
         ("atkinson", &include_bytes!("../assets/fonts/AtkinsonHyperlegible.ttf")[..]),
         ("lexend", &include_bytes!("../assets/fonts/Lexend.ttf")[..]),
@@ -551,7 +672,7 @@ pub fn install_fonts(ctx: &egui::Context, choice: UiFont, language: &str) {
         "ko" => ["noto-sans-kr", "noto-sans-jp", "noto-sans-sc", "noto-sans-tc"],
         _ => ["noto-sans-jp", "noto-sans-kr", "noto-sans-sc", "noto-sans-tc"],
     };
-    let fallbacks: Vec<String> = ["noto-sans", "noto-emoji"].into_iter().chain(cjk).map(str::to_owned).collect();
+    let fallbacks: Vec<String> = ["noto-sans", "noto-emoji", "noto-sans-arabic"].into_iter().chain(cjk).map(str::to_owned).collect();
 
     // The chosen face first; Noto covers anything it lacks, then egui's own symbol fonts.
     let proportional = fonts.families.entry(FontFamily::Proportional).or_default();
@@ -589,27 +710,64 @@ pub fn checkbox(ui: &mut egui::Ui, checked: &mut bool, text: &str) -> egui::Resp
     checkbox_ex(ui, checked, text, false)
 }
 
-/// Like [`checkbox`], optionally showing a "some selected" dash.
+/// Like [`checkbox`], optionally showing "some selected" (the knob in the middle).
+/// Drawn as a switch whose knob slides across (instantly with Reduce motion on).
 pub fn checkbox_ex(ui: &mut egui::Ui, checked: &mut bool, text: &str, indeterminate: bool) -> egui::Response {
-    const SIZE: f32 = 18.0;
+    const W: f32 = 34.0;
+    const H: f32 = 18.0;
     let galley = (!text.is_empty()).then(|| {
         ui.painter().layout_no_wrap(text.to_owned(), TextStyle::Body.resolve(ui.style()), ui.visuals().text_color())
     });
     let text_size = galley.as_ref().map_or(egui::Vec2::ZERO, |g| g.size());
-    let width = SIZE + if galley.is_some() { 8.0 + text_size.x } else { 0.0 };
-    let (rect, mut resp) = ui.allocate_exact_size(egui::vec2(width, SIZE.max(text_size.y)), egui::Sense::click());
+    let width = W + if galley.is_some() { 8.0 + text_size.x } else { 0.0 };
+    let (rect, mut resp) = ui.allocate_exact_size(egui::vec2(width, H.max(text_size.y)), egui::Sense::click());
     if resp.clicked() {
         *checked = !*checked;
         resp.mark_changed();
     }
     let (state, enabled) = (*checked, ui.is_enabled());
     resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Checkbox, enabled, state, text));
+    let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
+    // Animated with the style's animation time, which Reduce motion sets to zero.
+    let how_on = ui.ctx().animate_bool_responsive(resp.id, *checked);
     if !ui.is_rect_visible(rect) {
         return resp;
     }
     let visuals = ui.visuals();
-    let enabled = ui.is_enabled();
     let fade = |c: Color32| if enabled { c } else { c.linear_multiply(0.4) };
+    let pos = if indeterminate && !*checked { 0.5 } else { how_on };
+    let off_fill = if resp.hovered() { visuals.widgets.hovered.bg_fill } else { visuals.extreme_bg_color };
+    let on_fill = if resp.hovered() { accent_hover() } else { accent() };
+    let fill = if indeterminate && !*checked { on_fill.linear_multiply(0.6) } else { off_fill.lerp_to_gamma(on_fill, how_on) };
+    let stroke = visuals.weak_text_color().lerp_to_gamma(accent(), pos);
+    let track = egui::Rect::from_min_size(egui::pos2(rect.left(), rect.center().y - H / 2.0), egui::vec2(W, H));
+    let painter = ui.painter();
+    painter.rect(track, CornerRadius::same((H / 2.0) as u8), fade(fill), Stroke::new(1.5, fade(stroke)), egui::StrokeKind::Inside);
+    let r = H / 2.0 - 3.0;
+    let x = egui::lerp((track.left() + 3.0 + r)..=(track.right() - 3.0 - r), pos);
+    painter.circle_filled(egui::pos2(x, track.center().y), r, fade(Color32::WHITE));
+    if let Some(g) = galley {
+        let at = egui::pos2(track.right() + 8.0, rect.center().y - text_size.y / 2.0);
+        painter.galley(at, g, fade(visuals.text_color()));
+    }
+    resp
+}
+
+/// A tick box, for picking songs in the results table (settings use switches).
+pub fn select_box(ui: &mut egui::Ui, checked: &mut bool, indeterminate: bool) -> egui::Response {
+    const SIZE: f32 = 18.0;
+    let (rect, mut resp) = ui.allocate_exact_size(egui::vec2(SIZE, SIZE), egui::Sense::click());
+    if resp.clicked() {
+        *checked = !*checked;
+        resp.mark_changed();
+    }
+    let (state, enabled) = (*checked, ui.is_enabled());
+    resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Checkbox, enabled, state, ""));
+    let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
+    if !ui.is_rect_visible(rect) {
+        return resp;
+    }
+    let visuals = ui.visuals();
     let on = *checked || indeterminate;
     let (fill, stroke) = if on {
         (if resp.hovered() { accent_hover() } else { accent() }, accent())
@@ -618,19 +776,14 @@ pub fn checkbox_ex(ui: &mut egui::Ui, checked: &mut bool, text: &str, indetermin
     } else {
         (visuals.extreme_bg_color, visuals.weak_text_color())
     };
-    let b = egui::Rect::from_center_size(egui::pos2(rect.left() + SIZE / 2.0, rect.center().y), egui::vec2(SIZE, SIZE));
     let painter = ui.painter();
-    painter.rect(b, CornerRadius::same(4), fade(fill), Stroke::new(1.5, fade(stroke)), egui::StrokeKind::Inside);
-    let mark = Stroke::new(2.2, fade(Color32::WHITE));
+    painter.rect(rect, CornerRadius::same(4), fill, Stroke::new(1.5, stroke), egui::StrokeKind::Inside);
+    let mark = Stroke::new(2.2, Color32::WHITE);
     if indeterminate && !*checked {
-        painter.line_segment([b.lerp_inside(egui::vec2(0.25, 0.5)), b.lerp_inside(egui::vec2(0.75, 0.5))], mark);
+        painter.line_segment([rect.lerp_inside(egui::vec2(0.25, 0.5)), rect.lerp_inside(egui::vec2(0.75, 0.5))], mark);
     } else if *checked {
-        let pts = [egui::vec2(0.24, 0.52), egui::vec2(0.42, 0.70), egui::vec2(0.77, 0.31)].map(|p| b.lerp_inside(p));
+        let pts = [egui::vec2(0.24, 0.52), egui::vec2(0.42, 0.70), egui::vec2(0.77, 0.31)].map(|p| rect.lerp_inside(p));
         painter.add(egui::Shape::line(pts.to_vec(), mark));
-    }
-    if let Some(g) = galley {
-        let pos = egui::pos2(b.right() + 8.0, rect.center().y - text_size.y / 2.0);
-        painter.galley(pos, g, fade(visuals.text_color()));
     }
     resp
 }

@@ -6,6 +6,7 @@
 //!   GET /v1/stats/site-totals               -> how many players there are, for percentiles
 //!   GET /v1/scores?songHash=..&accountId=.. -> a player's placement on a song
 
+use std::collections::HashMap;
 use std::sync::mpsc::{Receiver, channel};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -158,6 +159,7 @@ struct Score {
     song_hash: String,
     name: String,
     artist: String,
+    charter: String,
     instrument: String,
     difficulty: String,
     total: u64,
@@ -178,6 +180,8 @@ struct Profile {
     id: u64,
     name: String,
     joined: String,
+    /// Scores they've submitted.
+    submissions: u64,
     stats: Vec<Stat>,
     instruments: Vec<(String, u64)>,
     artists: Vec<(String, u64)>,
@@ -189,6 +193,9 @@ struct Profile {
     avatar: Option<egui::ColorImage>,
     avatar_color: Color32,
 }
+
+/// How many players can be compared with a profile at once (one colour each).
+const MAX_COMPARE: usize = 5;
 
 const PARTS: [&str; 6] = [n("Notes"), n("Sustains"), n("Solos"), n("Combo"), n("Star power"), n("Other")];
 
@@ -222,6 +229,7 @@ fn fetch_profile(http: &Client, id: u64) -> Result<Profile> {
                 song_hash: text(&e["songHash"]),
                 name: text(&e["name"]),
                 artist: text(&e["artist"]),
+                charter: text(&e["charter"]),
                 instrument: text(&e["instrument"]),
                 difficulty: text(&e["difficulty"]),
                 total: part("totalScore"),
@@ -249,6 +257,7 @@ fn fetch_profile(http: &Client, id: u64) -> Result<Profile> {
         id,
         name: text(&v["username"]),
         joined: text(&v["createdAt"]).get(..10).unwrap_or_default().to_owned(),
+        submissions: num(&v["submissionCount"]),
         stats,
         instruments: pairs("topInstruments", "instrument"),
         artists: pairs("topArtists", "artist"),
@@ -352,6 +361,7 @@ struct Recent {
     player: String,
     name: String,
     artist: String,
+    charter: String,
     instrument: String,
     difficulty: String,
     score: u64,
@@ -387,6 +397,7 @@ fn fetch_recent(http: &Client) -> Result<Vec<Recent>> {
             player: text(&e["username"]),
             name: text(&e["name"]),
             artist: text(&e["artist"]),
+            charter: text(&e["charter"]),
             instrument: text(&e["instrument"]),
             difficulty: text(&e["difficulty"]),
             score: num(&e["totalScore"]),
@@ -402,12 +413,12 @@ fn fetch_recent(http: &Client) -> Result<Vec<Recent>> {
 fn fetch_totals(http: &Client) -> Result<Totals> {
     let v = get(http, "/stats/site-totals", &[])?;
     Ok(Totals(vec![
-        ("Players", num(&v["users"])),
-        ("Scores submitted", num(&v["submissions"])),
-        ("Songs", num(&v["songs"])),
-        ("Notes hit", num(&v["notesHit"])),
-        ("Full combos", num(&v["fcs"])),
-        ("Hours played", num(&v["hoursPlayed"])),
+        (n("Players"), num(&v["users"])),
+        (n("Scores submitted"), num(&v["submissions"])),
+        (n("Songs"), num(&v["songs"])),
+        (n("Notes hit"), num(&v["notesHit"])),
+        (n("Full combos"), num(&v["fcs"])),
+        (n("Hours played"), num(&v["hoursPlayed"])),
     ]))
 }
 
@@ -438,23 +449,79 @@ struct Window {
     avatar: Option<egui::TextureHandle>,
 }
 
-/// The player being compared with, and their picture.
+/// A player being compared with, and their picture.
 struct Other {
+    id: u64,
     name: String,
     profile: Load<Profile>,
     avatar: Option<egui::TextureHandle>,
 }
 
+/// What a `user:` search knows about a player: their name as written and the charts in their
+/// profile (name, artist, charter, all lower case), or None if there's no such player.
+pub type Played = Option<(String, Vec<(String, String, String)>)>;
+
+/// Looks a player up by name and lists the charts on their profile: the latest scores and most
+/// played songs (the leaderboards don't share more than that).
+fn fetch_played(http: &Client, name: &str) -> Result<Played> {
+    let found = search_players(http, name)?;
+    let Some(f) = found.iter().find(|f| f.name.eq_ignore_ascii_case(name)).or(found.first()) else {
+        return Ok(None);
+    };
+    let v = get(http, &format!("/account/{}/profile", f.id), &[])?;
+    let lower = |e: &Value, k: &str| text(&e[k]).to_lowercase();
+    let mut charts: Vec<(String, String, String)> = ["latestSubmissions", "mostPlayed", "topSubmissions"]
+        .iter()
+        .flat_map(|k| v[*k].as_array().cloned().unwrap_or_default())
+        .map(|e| (lower(&e, "name"), lower(&e, "artist"), lower(&e, "charter")))
+        .collect();
+    charts.sort();
+    charts.dedup();
+    Ok(Some((text(&v["username"]), charts)))
+}
+
+/// Album art for songs and artists by (lower-case) name, from the catalogue, so lists of
+/// played songs can show covers: (catalogue size it was built from, by (name, artist), by artist).
+#[derive(Default)]
+struct Art(usize, HashMap<(String, String), String>, HashMap<String, String>);
+
+impl Art {
+    fn update(&mut self, charts: &[crate::api::Chart]) {
+        if self.0 == charts.len() {
+            return;
+        }
+        let (mut songs, mut artists) = (HashMap::new(), HashMap::new());
+        for c in charts {
+            let (Some(art), Some(artist)) = (&c.art, &c.artist) else { continue };
+            let artist = artist.to_lowercase();
+            if let Some(name) = &c.name {
+                songs.entry((name.to_lowercase(), artist.clone())).or_insert_with(|| art.clone());
+            }
+            artists.entry(artist).or_insert_with(|| art.clone());
+        }
+        *self = Art(charts.len(), songs, artists);
+    }
+
+    fn song(&self, name: &str, artist: &str) -> Option<&str> {
+        self.1.get(&(name.to_lowercase(), artist.to_lowercase())).map(String::as_str)
+    }
+
+    fn artist(&self, artist: &str) -> Option<&str> {
+        self.2.get(&artist.to_lowercase()).map(String::as_str)
+    }
+}
+
 pub struct Players {
     http: Client,
-    /// The Charts search's player chips: the last searched text and the players it found.
-    found: Option<(String, Load<Vec<Found>>)>,
-    typed: (String, Instant),
+    art: Art,
+    /// `user:` searches: each player's charts, by lower-case name.
+    played: HashMap<String, Load<Played>>,
     /// The Players tab's own search, and the compare search.
     find: Finder,
     compare_find: Finder,
     window: Option<Window>,
-    other: Option<Other>,
+    /// Players compared with the profile (up to `MAX_COMPARE`), each in its own colour.
+    others: Vec<Other>,
     /// Profiles viewed before this one, for Back.
     history: Vec<(u64, String)>,
     /// Set when a profile was opened, so the app switches to the Players tab.
@@ -476,27 +543,41 @@ struct Finder {
     text: String,
     typed: Instant,
     found: Option<(String, Load<Vec<Found>>)>,
+    /// The results dropdown is showing (typing opens it; picking, Esc or clicking away closes it).
+    open: bool,
 }
 
 impl Finder {
     fn new() -> Self {
-        Self { text: String::new(), typed: Instant::now(), found: None }
+        Self { text: String::new(), typed: Instant::now(), found: None, open: false }
     }
 
-    /// The box itself; returns the players found for what's typed, once they're in.
-    fn show(&mut self, ui: &mut egui::Ui, http: &Client, hint: &str) -> Option<Vec<Found>> {
+    /// The box, with what's found in a dropdown under it (over the content, not pushing it
+    /// down). Returns the player picked from it.
+    /// Players in `exclude` (by id) aren't listed.
+    fn show(&mut self, ui: &mut egui::Ui, http: &Client, hint: &str, z: Sizes, exclude: &[u64]) -> Option<Found> {
         let resp = ui.add(
             egui::TextEdit::singleline(&mut self.text)
                 .hint_text(hint)
                 .font(egui::FontId::proportional(15.0))
-                .margin(egui::Margin::symmetric(10, 6))
+                .margin(egui::Margin { left: 10, right: 32, top: 6, bottom: 6 })
                 .desired_width(f32::INFINITY),
         );
         if resp.changed() {
             self.typed = Instant::now();
+            self.open = true;
+        }
+        if resp.gained_focus() {
+            self.open = true;
+        }
+        // An ✕ to empty the box, like the Charts search.
+        if !self.text.is_empty() && crate::clear_button(ui, resp.rect, hint) {
+            self.text.clear();
+            self.found = None;
+            resp.request_focus();
         }
         let query = self.text.trim().to_owned();
-        if query.chars().count() < 2 {
+        if query.chars().count() < 2 || !self.open {
             return None;
         }
         if self.found.as_ref().is_none_or(|(q, _)| *q != query) {
@@ -509,22 +590,47 @@ impl Finder {
             self.found = Some((query.clone(), Load::start(ui.ctx(), move || search_players(&http, &q))));
         }
         let (_, load) = self.found.as_mut()?;
-        match load.poll() {
-            Load::Loading(_) => {
-                ui.spinner();
-                None
-            }
-            Load::Failed(e) => {
-                ui.weak(tr!("Couldn't search: {error}", error = e));
-                None
-            }
-            Load::Ready(found) => {
-                if found.is_empty() {
-                    ui.weak(t("No players found"));
-                }
-                Some(found.clone())
-            }
+        let mut pick = None;
+        let area = egui::Area::new(ui.id().with(("finder_dropdown", hint)))
+            .order(egui::Order::Foreground)
+            .fixed_pos(resp.rect.left_bottom() + vec2(0.0, 4.0))
+            .show(ui.ctx(), |ui| {
+                egui::Frame::popup(ui.style()).show(ui, |ui| {
+                    ui.set_width(resp.rect.width() - 14.0);
+                    match load.poll() {
+                        Load::Loading(_) => {
+                            crate::theme::hrow(ui, |ui| {
+                                ui.spinner();
+                                ui.weak(t("Searching…"));
+                            });
+                        }
+                        Load::Failed(e) => {
+                            ui.weak(tr!("Couldn't search: {error}", error = e));
+                        }
+                        Load::Ready(found) if found.iter().all(|f| exclude.contains(&f.id)) => {
+                            ui.weak(t("No players found"));
+                        }
+                        Load::Ready(found) => {
+                            for (k, f) in found.iter().filter(|f| !exclude.contains(&f.id)).enumerate() {
+                                let resp = row(ui, k, z.row.max(32.0), true, false, |ui| {
+                                    small_avatar(ui, f.id, &f.name, 24.0);
+                                    ui.add_space(4.0);
+                                    plain(ui, RichText::new(&f.name).size(z.text).strong());
+                                });
+                                if resp.on_hover_text(t("Open this player's profile")).clicked() {
+                                    pick = Some(f.clone());
+                                }
+                            }
+                        }
+                    }
+                });
+            });
+        // Clicking anywhere else, or Esc, closes it.
+        let clicked_away = ui.input(|i| i.pointer.any_click()) && !area.response.hovered() && !resp.hovered();
+        if pick.is_some() || clicked_away || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+            self.open = false;
         }
+        pick
     }
 }
 
@@ -538,12 +644,12 @@ impl Players {
             .unwrap_or_default();
         Self {
             http,
-            found: None,
-            typed: (String::new(), Instant::now()),
+            art: Art::default(),
+            played: Default::default(),
             find: Finder::new(),
             compare_find: Finder::new(),
             window: None,
-            other: None,
+            others: Vec::new(),
             history: Vec::new(),
             opened: false,
             sizes: sizes(Density::Default),
@@ -576,14 +682,16 @@ impl Players {
     fn show_profile(&mut self, ctx: &egui::Context, id: u64, name: String) {
         let http = self.http.clone();
         self.window = Some(Window { id, name, profile: Load::start(ctx, move || fetch_profile(&http, id)), placements: Vec::new(), avatar: None });
-        if self.other.as_ref().is_some_and(|o| matches!(&o.profile, Load::Ready(p) if p.id == id)) {
-            self.other = None;
-        }
+        // Nobody is compared with themselves.
+        self.others.retain(|o| o.id != id);
     }
 
     fn compare_with(&mut self, ctx: &egui::Context, id: u64, name: String) {
+        if self.others.len() >= MAX_COMPARE || self.others.iter().any(|o| o.id == id) || self.window.as_ref().is_some_and(|w| w.id == id) {
+            return;
+        }
         let http = self.http.clone();
-        self.other = Some(Other { name, profile: Load::start(ctx, move || fetch_profile(&http, id)), avatar: None });
+        self.others.push(Other { id, name, profile: Load::start(ctx, move || fetch_profile(&http, id)), avatar: None });
     }
 
     /// Whether a profile was opened since the last call (so the app can show the Players tab).
@@ -591,45 +699,29 @@ impl Players {
         std::mem::take(&mut self.opened)
     }
 
-    /// Players whose names match the search text, as chips under the search bar.
-    pub fn search_strip(&mut self, ui: &mut egui::Ui, query: &str) {
-        let query = query.trim();
-        if query != self.typed.0 {
-            self.typed = (query.to_owned(), Instant::now());
-        }
-        // Names are at least 2 characters; links and hashes aren't names.
-        let searchable = query.chars().count() >= 2 && !query.contains("://") && !query.contains('/');
-        if searchable && self.found.as_ref().is_none_or(|(q, _)| q != query) {
-            let waited = self.typed.1.elapsed();
-            if waited < SEARCH_DELAY {
-                ui.ctx().request_repaint_after(SEARCH_DELAY - waited);
-            } else {
-                let (http, q) = (self.http.clone(), query.to_owned());
-                self.found = Some((q.clone(), Load::start(ui.ctx(), move || search_players(&http, &q))));
-            }
-        }
-        if !searchable {
-            return;
-        }
-        let Some((q, load)) = &mut self.found else { return };
-        if q != query {
-            return;
-        }
-        let Some(found) = load.ready().cloned() else { return };
-        if found.is_empty() {
-            return;
-        }
-        let mut open = None;
-        ui.horizontal_wrapped(|ui| {
-            ui.label(RichText::new(t("👤 Players:")).weak());
-            for f in &found {
-                if theme::chip(ui, &f.name, theme::accent()).on_hover_text(t("Open this player's profile")).clicked() {
-                    open = Some(f.clone());
-                }
-            }
+    /// Clone Hero's 100 most played songs of all time (name, artist, lower case), most first,
+    /// once they've been fetched (it starts fetching them).
+    pub fn popular_songs(&mut self, ctx: &egui::Context) -> Option<Vec<(String, String)>> {
+        let k = PERIODS.iter().position(|p| p.0 == "topAllTime")?;
+        let load = self.popular[k].get_or_insert_with(|| {
+            let http = self.http.clone();
+            Load::start(ctx, move || fetch_popular(&http, "topAllTime"))
         });
-        if let Some(f) = open {
-            self.open(ui.ctx(), f.id, f.name);
+        load.ready().map(|songs| songs.iter().map(|s| (s.name.to_lowercase(), s.artist.to_lowercase())).collect())
+    }
+
+    /// The charts a player has played, for a `user:` search: None while it's being looked up,
+    /// then the result (or an error).
+    pub fn played(&mut self, ctx: &egui::Context, name: &str) -> Option<Result<&Played, String>> {
+        let key = name.trim().to_lowercase();
+        let load = self.played.entry(key.clone()).or_insert_with(|| {
+            let http = self.http.clone();
+            Load::start(ctx, move || fetch_played(&http, &key))
+        });
+        match load.poll() {
+            Load::Loading(_) => None,
+            Load::Failed(e) => Some(Err(e.clone())),
+            Load::Ready(p) => Some(Ok(&*p)),
         }
     }
 
@@ -642,57 +734,48 @@ impl Players {
 
     /// The Players tab: finding and comparing players on the left, the profile on the right.
     /// `can_return` says there's another tab to go back to; returns true when Back asks for it.
-    pub fn players_tab(&mut self, ui: &mut egui::Ui, can_return: bool) -> bool {
+    pub fn players_tab(&mut self, ui: &mut egui::Ui, can_return: bool, charts: &[crate::api::Chart], covers: &mut crate::covers::Covers) -> bool {
+        self.art.update(charts);
         let ctx = ui.ctx().clone();
         let z = self.sizes;
-        egui::Panel::left("player_search").resizable(true).default_size(290.0).size_range(230.0..=440.0).show(ui, |ui| {
+        let side = if crate::i18n::rtl() { egui::Panel::right("player_search") } else { egui::Panel::left("player_search") };
+        side.resizable(true).default_size(290.0).size_range(230.0..=440.0).show(ui, |ui| {
             crate::fancy_scroll(ui, "players_side", |ui| {
                 ui.add_space(8.0);
-                if let Some(found) = self.find.show(ui, &self.http.clone(), &t("🔍  Find a player…")) {
-                    let current = self.window.as_ref().map(|w| w.id);
-                    let mut pick = None;
-                    for (k, f) in found.iter().enumerate() {
-                        let resp = row(ui, k, z.row, true, current == Some(f.id), |ui| {
-                            plain(ui, RichText::new(format!("👤  {}", f.name)).size(z.text).strong());
-                        });
-                        if resp.on_hover_text(t("Open this player's profile")).clicked() {
-                            pick = Some(f.clone());
-                        }
-                    }
-                    if let Some(f) = pick {
-                        self.open(&ctx, f.id, f.name);
-                        self.opened = false;
-                    }
+                if let Some(f) = self.find.show(ui, &self.http.clone(), &t("🔍  Find a player…"), z, &[]) {
+                    self.open(&ctx, f.id, f.name);
+                    self.opened = false;
                 }
 
                 // Compare: right under the search, since it's a main feature.
                 if self.window.is_some() {
                     ui.add_space(10.0);
-                    crate::section(ui, "side_compare", &t("⚖  Compare"), Some(&t("Put another player's stats side by side with this profile")), |ui| {
-                        if let Some(name) = self.other.as_ref().map(|o| o.name.clone()) {
-                            ui.horizontal(|ui| {
-                                plain(ui, RichText::new(format!("⚖  {name}")).size(z.text).strong().color(series(1)));
+                    crate::section(ui, "side_compare", &t("⚖  Compare"), Some(&t("Put other players' stats side by side with this profile")), |ui| {
+                        let mut remove = None;
+                        for (k, o) in self.others.iter().enumerate() {
+                            crate::theme::hrow(ui, |ui| {
+                                plain(ui, RichText::new(format!("⚖  {}", o.name)).size(z.text).strong().color(series(k + 1)));
                                 if ui.small_button("✖").on_hover_text(t("Stop comparing")).clicked() {
-                                    self.other = None;
+                                    remove = Some(k);
                                 }
                             });
+                        }
+                        if let Some(k) = remove {
+                            self.others.remove(k);
+                        }
+                        if !self.others.is_empty() {
                             ui.add_space(4.0);
                         }
-                        if let Some(found) = self.compare_find.show(ui, &self.http.clone(), &t("Compare with…")) {
-                            let mut pick = None;
-                            for (k, f) in found.iter().enumerate() {
-                                if row(ui, k, z.row, true, false, |ui| {
-                                    plain(ui, RichText::new(format!("⚖  {}", f.name)).size(z.text));
-                                })
-                                .clicked()
-                                {
-                                    pick = Some(f.clone());
-                                }
-                            }
-                            if let Some(f) = pick {
+                        if self.others.len() < MAX_COMPARE {
+                            // The profile's player and those already compared aren't offered.
+                            let mut taken: Vec<u64> = self.others.iter().map(|o| o.id).collect();
+                            taken.extend(self.window.as_ref().map(|w| w.id));
+                            if let Some(f) = self.compare_find.show(ui, &self.http.clone(), &t("Compare with…"), z, &taken) {
                                 self.compare_with(&ctx, f.id, f.name);
                                 self.compare_find.text.clear();
                             }
+                        } else {
+                            ui.weak(tr!("Up to {count} players at a time", count = MAX_COMPARE));
                         }
                     });
                 }
@@ -712,10 +795,10 @@ impl Players {
                     let current = self.window.as_ref().map(|w| w.id);
                     show_load(ui, load, |ui, rows: &Vec<Ranked>| {
                         for (k, r) in rows.iter().enumerate() {
-                            let resp = row(ui, k, z.row, true, current == Some(r.id), |ui| {
+                            let resp = ranked_row(ui, k, z.row, current == Some(r.id), k as u64 + 1, |ui| {
                                 place_badge(ui, k as u64 + 1);
                                 plain(ui, RichText::new(&r.name).size(z.text).strong());
-                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                ui.with_layout(crate::theme::trailing(), |ui| {
                                     plain(ui, RichText::new(thousands(r.value)).size(z.text - 1.0).weak());
                                 });
                             });
@@ -752,9 +835,9 @@ impl Players {
                 }
             }
             let http = self.http.clone();
-            let (window, other) = (&mut self.window, &mut self.other);
+            let (window, others, art) = (&mut self.window, &mut self.others, &self.art);
             if let Some(w) = window {
-                crate::fancy_scroll(ui, "player_profile", |ui| profile_view(ui, &http, w, other.as_mut(), z));
+                crate::fancy_scroll(ui, "player_profile", |ui| profile_view(ui, &http, w, others, z, art, covers));
             }
         });
         back_to_tab
@@ -764,6 +847,7 @@ impl Players {
     /// newest scores.
     pub fn leaderboards_tab(&mut self, ui: &mut egui::Ui, charts: &[crate::api::Chart], covers: &mut crate::covers::Covers) {
         let z = self.sizes;
+        self.art.update(charts);
         if self.newest.0 != charts.len() {
             // The 15 most recently added or updated charts on Encore.
             let mut newest: Vec<&crate::api::Chart> = charts.iter().filter(|c| c.modified.is_some()).collect();
@@ -786,7 +870,7 @@ impl Players {
             });
             if let Some(Totals(list)) = totals.ready() {
                 let stats: Vec<Stat> = list.iter().enumerate().map(|(k, (label, value))| Stat { icon: TOTAL_ICONS[k], label, value: *value, shown: thousands(*value), rank: None }).collect();
-                tile_rows(ui, z, &stats, |ui, s| stat_tile(ui, z, s, 0));
+                tile_rows(ui, z, &stats, |ui, k, s, w| stat_tile(ui, z, k, s, 0, w));
                 ui.add_space(8.0);
             }
 
@@ -805,10 +889,10 @@ impl Players {
                         show_load(ui, load, |ui, rows: &Vec<Ranked>| {
                             let max = rows.iter().map(|r| r.value).max().unwrap_or(1).max(1);
                             for (k, r) in rows.iter().enumerate() {
-                                let resp = row(ui, k, z.row, true, false, |ui| {
+                                let resp = ranked_row(ui, k, z.row, false, k as u64 + 1, |ui| {
                                     place_badge(ui, k as u64 + 1);
                                     plain(ui, RichText::new(&r.name).size(z.text).strong());
-                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    ui.with_layout(crate::theme::trailing(), |ui| {
                                         plain(ui, RichText::new(thousands(r.value)).size(z.text).monospace());
                                         mini_bar(ui, 110.0, r.value as f32 / max as f32, theme::accent());
                                     });
@@ -840,13 +924,13 @@ impl Players {
                                     plain(ui, RichText::new(format!("{:>2}", k + 1)).size(z.text).weak().monospace());
                                     plain(ui, RichText::new(&r.name).size(z.text).strong());
                                     plain(ui, RichText::new(&r.artist).size(z.text).weak());
-                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    ui.with_layout(crate::theme::trailing(), |ui| {
                                         plain(ui, RichText::new(thousands(r.plays)).size(z.text).monospace());
                                         mini_bar(ui, 90.0, r.plays as f32 / max as f32, theme::accent());
                                     });
                                 });
                                 if resp.on_hover_text(t("Search for this song")).clicked() {
-                                    request_search(ui.ctx(), &format!("{} {}", r.artist, r.name));
+                                    request_search(ui.ctx(), &song_query(&r.name, &r.artist, None));
                                 }
                             }
                         });
@@ -858,10 +942,10 @@ impl Players {
                             let resp = row(ui, k, height, true, false, |ui| {
                                 crate::cover(ui, covers, c.art.as_deref(), z.cover, crate::covers::THUMB);
                                 ui.add_space(4.0);
-                                ui.vertical(|ui| {
+                                crate::theme::vcol(ui, |ui| {
                                     ui.spacing_mut().item_spacing.y = 2.0;
                                     plain(ui, RichText::new(format!("{} · {}", c.name.as_deref().unwrap_or("?"), c.artist.as_deref().unwrap_or("?"))).size(z.text).strong());
-                                    ui.horizontal(|ui| {
+                                    crate::theme::hrow(ui, |ui| {
                                         ui.spacing_mut().item_spacing.x = 6.0;
                                         crate::tags(ui, c, false);
                                         for (i, letter) in [(0usize, "G"), (3, "B"), (4, "D"), (5, "K")] {
@@ -875,7 +959,7 @@ impl Players {
                                         }
                                     });
                                 });
-                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                ui.with_layout(crate::theme::trailing(), |ui| {
                                     plain(ui, RichText::new(c.uploaded()).size(z.text - 1.5).weak());
                                     if let Some(ch) = &c.charter {
                                         plain(ui, RichText::new(format!("✏ {ch}")).size(z.text - 1.5).weak());
@@ -888,10 +972,8 @@ impl Players {
                         }
                     });
                     ui.add_space(8.0);
-                    crate::section(ui, "lb_latest", &t("🕒  Latest scores"), Some(&t("The newest scores submitted to Clone Hero; click one to see the player")), |ui| {
-                        if ui.small_button(format!("↻  {}", t("Refresh"))).clicked() {
-                            me.recent = None;
-                        }
+                    let refresh = format!("↻  {}", t("Refresh"));
+                    let reload = crate::section_ex(ui, "lb_latest", &t("🕒  Latest scores"), Some(&t("The newest scores submitted to Clone Hero; click one to see the player")), Some(&refresh), |ui| {
                         let load = me.recent.get_or_insert_with(|| {
                             let http = http.clone();
                             Load::start(&ctx, move || fetch_recent(&http))
@@ -911,13 +993,20 @@ impl Players {
                                     score: r.score,
                                     placement: None,
                                     detail: None,
+                                    art: me.art.song(&r.name, &r.artist),
                                 };
-                                if score_row(ui, k, z, &line, None).on_hover_text(t("Open this player's profile")).clicked() {
+                                let (resp, find) = score_row(ui, k, z, &line, None, covers);
+                                if find {
+                                    request_search(ui.ctx(), &song_query(&r.name, &r.artist, Some(&r.charter)));
+                                } else if resp.on_hover_text(t("Open this player's profile")).clicked() {
                                     *open = Some((r.id, r.player.clone()));
                                 }
                             }
                         });
                     });
+                    if reload {
+                        me.recent = None;
+                    }
                 }
             };
             if wide {
@@ -938,10 +1027,10 @@ impl Players {
 
 // ─────────────────────────────── Profile ───────────────────────────────
 
-fn profile_view(ui: &mut egui::Ui, http: &Client, w: &mut Window, other: Option<&mut Other>, z: Sizes) {
+fn profile_view(ui: &mut egui::Ui, http: &Client, w: &mut Window, others: &mut [Other], z: Sizes, art: &Art, covers: &mut crate::covers::Covers) {
     let p = match w.profile.poll() {
         Load::Loading(_) => {
-            ui.horizontal(|ui| {
+            crate::theme::hrow(ui, |ui| {
                 ui.spinner();
                 ui.label(RichText::new(&w.name).strong());
                 ui.weak(t("Loading the profile…"));
@@ -960,32 +1049,42 @@ fn profile_view(ui: &mut egui::Ui, http: &Client, w: &mut Window, other: Option<
     ui.add_space(10.0);
 
     // Comparing comes first: it's what this screen is most often for.
-    if let Some(o) = other {
-        let name = o.name.clone();
-        match o.profile.poll() {
-            Load::Loading(_) => {
-                ui.horizontal(|ui| {
-                    ui.spinner();
-                    ui.weak(tr!("Loading {name}…", name = name));
-                });
+    if !others.is_empty() {
+        let mut loading = Vec::new();
+        let mut ready: Vec<(&Profile, Option<egui::TextureHandle>)> = Vec::new();
+        for (k, o) in others.iter_mut().enumerate() {
+            match o.profile.poll() {
+                Load::Loading(_) => loading.push(o.name.clone()),
+                Load::Failed(e) => {
+                    ui.weak(tr!("Couldn't load the profile: {error}", error = e));
+                }
+                Load::Ready(op) => {
+                    let tex = avatar_texture(ui.ctx(), &mut o.avatar, op, &format!("avatar_other_{k}"));
+                    ready.push((op, tex));
+                }
             }
-            Load::Failed(e) => {
-                ui.weak(tr!("Couldn't load the profile: {error}", error = e));
-            }
-            Load::Ready(op) => {
-                let other_avatar = avatar_texture(ui.ctx(), &mut o.avatar, op, "avatar_other");
-                crate::section(ui, "player_compare", &tr!("⚖  {a} vs {b}", a = p.name, b = op.name), Some(&t("Each stat's share of the two players' combined total")), |ui| {
-                    compare_view(ui, p, op, avatar.as_ref(), other_avatar.as_ref(), z);
-                });
-                ui.add_space(8.0);
-            }
+        }
+        for name in loading {
+            crate::theme::hrow(ui, |ui| {
+                ui.spinner();
+                ui.weak(tr!("Loading {name}…", name = name));
+            });
+        }
+        if !ready.is_empty() {
+            let names: Vec<&str> = ready.iter().map(|(op, _)| op.name.as_str()).collect();
+            let title = tr!("⚖  {a} vs {b}", a = p.name, b = names.join(" vs "));
+            let mut players: Vec<(&Profile, Option<&egui::TextureHandle>)> = vec![(p, avatar.as_ref())];
+            players.extend(ready.iter().map(|(op, tex)| (*op, tex.as_ref())));
+            crate::section(ui, "player_compare", &title, Some(&t("Each stat's share of the players' combined total")), |ui| {
+                compare_view(ui, &players, z);
+            });
+            ui.add_space(8.0);
         }
     }
 
-    crate::section(ui, "player_stats", &t("📊  Stats"), Some(&t("Their totals, and where each one ranks among all Clone Hero players")), |ui| {
-        tile_rows(ui, z, &p.stats, |ui, s| stat_tile(ui, z, s, p.players));
-    });
-    ui.add_space(8.0);
+    // The stats are the heart of a profile, so they're always shown (not in a section).
+    tile_rows(ui, z, &p.stats, |ui, k, s, w| stat_tile(ui, z, k, s, p.players, w));
+    ui.add_space(4.0);
 
     if !p.latest.is_empty() {
         if w.placements.len() != p.latest.len() {
@@ -1020,48 +1119,58 @@ fn profile_view(ui: &mut egui::Ui, http: &Client, w: &mut Window, other: Option<
                         tr!("Star power {hit}/{count}", hit = s.sp_hit, count = s.sp_count),
                         tr!("{count} squeezes", count = s.squeezes)
                     )),
+                    art: art.song(&s.name, &s.artist),
                 };
-                if score_row(ui, k, z, &line, Some(&s.parts)).on_hover_text(t("Search for this song")).clicked() {
-                    request_search(ui.ctx(), &format!("{} {}", s.artist, s.name));
+                let (resp, find) = score_row(ui, k, z, &line, Some(&s.parts), covers);
+                if find || resp.on_hover_text(t("Search for this song")).clicked() {
+                    request_search(ui.ctx(), &song_query(&s.name, &s.artist, Some(&s.charter)));
                 }
             }
         });
         ui.add_space(8.0);
     }
 
-    let list = |ui: &mut egui::Ui, id: &str, title: &str, tip: &str, rows: Vec<(String, String, u64)>, search: bool| {
+    // Rows of (name, detail, plays, album art if it has a cover column).
+    let mut list = |ui: &mut egui::Ui, id: &str, title: &str, tip: &str, rows: Vec<(String, String, u64, Option<Option<&str>>)>, search: bool| {
         if rows.is_empty() {
             return;
         }
         crate::section(ui, id, title, Some(tip), |ui| {
             let max = rows.iter().map(|r| r.2).max().unwrap_or(1).max(1);
-            for (k, (main, sub, plays)) in rows.iter().enumerate() {
-                let resp = row(ui, k, z.row, search, false, |ui| {
+            let with_art = rows.iter().any(|r| r.3.is_some());
+            let height = if with_art { z.row.max(z.cover * 0.8) + 6.0 } else { z.row };
+            for (k, (main, sub, plays, cover)) in rows.iter().enumerate() {
+                let resp = row(ui, k, height, search, false, |ui| {
                     plain(ui, RichText::new(format!("{:>2}", k + 1)).size(z.text).weak().monospace());
+                    if let Some(art) = cover {
+                        crate::cover(ui, covers, *art, height - 6.0, crate::covers::THUMB);
+                    }
                     plain(ui, RichText::new(main).size(z.text).strong());
                     if !sub.is_empty() {
                         plain(ui, RichText::new(sub).size(z.text).weak());
                     }
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.with_layout(crate::theme::trailing(), |ui| {
                         plain(ui, RichText::new(tr!("{count} plays", count = thousands(*plays))).size(z.text - 1.0).weak());
                         mini_bar(ui, 100.0, *plays as f32 / max as f32, theme::accent());
                     });
                 });
                 if search && resp.on_hover_text(t("Search for this")).clicked() {
-                    request_search(ui.ctx(), &format!("{sub} {main}").trim().to_owned());
+                    // Songs (name and artist), or an artist on their own.
+                    let query = if sub.is_empty() { field_query("a", main) } else { song_query(main, sub, None) };
+                    request_search(ui.ctx(), &query);
                 }
             }
         });
         ui.add_space(8.0);
     };
-    list(ui, "player_most_played", &t("🔁  Most played"), &t("Songs they've played most; click one to find it"), p.most_played.iter().map(|(n, a, c)| (n.clone(), a.clone(), *c)).collect(), true);
-    list(ui, "player_artists", &t("🎤  Top artists"), &t("Artists they've played most; click one to find their songs"), p.artists.iter().map(|(a, c)| (a.clone(), String::new(), *c)).collect(), true);
+    list(ui, "player_most_played", &t("🔁  Most played"), &t("Songs they've played most; click one to find it"), p.most_played.iter().map(|(n, a, c)| (n.clone(), a.clone(), *c, Some(art.song(n, a)))).collect(), true);
+    list(ui, "player_artists", &t("🎤  Top artists"), &t("Artists they've played most; click one to find their songs"), p.artists.iter().map(|(a, c)| (a.clone(), String::new(), *c, Some(art.artist(a)))).collect(), true);
     list(
         ui,
         "player_instruments",
         &t("🎸  Instruments"),
         &t("Scores submitted per instrument"),
-        p.instruments.iter().map(|(i, c)| (format!("{}  {}", instrument_icon(i), crate::leaderboard::instrument_name(i)), String::new(), *c)).collect(),
+        p.instruments.iter().map(|(i, c)| (format!("{}  {}", instrument_icon(i), crate::leaderboard::instrument_name(i)), String::new(), *c, None)).collect(),
         false,
     );
     ui.add_space(12.0);
@@ -1092,6 +1201,58 @@ fn avatar_circle(ui: &mut egui::Ui, p: &Profile, tex: Option<&egui::TextureHandl
     }
 }
 
+/// A player's avatar as other lists show it (e.g. the details panel leaderboard), looked up in
+/// the background the first time: the picture, or their default colour.
+enum Avatar {
+    Loading,
+    Picture(Option<egui::ColorImage>, Option<egui::TextureHandle>),
+    Colour(Color32),
+}
+
+static AVATARS: std::sync::LazyLock<std::sync::Mutex<HashMap<u64, Avatar>>> = std::sync::LazyLock::new(Default::default);
+
+/// Draws a small round avatar for a player by account id, with their initial until (or unless)
+/// there's a picture.
+pub fn small_avatar(ui: &mut egui::Ui, id: u64, name: &str, size: f32) {
+    let (rect, _) = ui.allocate_exact_size(vec2(size, size), Sense::hover());
+    let mut avatars = AVATARS.lock().unwrap();
+    let entry = avatars.entry(id).or_insert_with(|| {
+        let ctx = ui.ctx().clone();
+        thread::spawn(move || {
+            let http = Client::builder().timeout(Duration::from_secs(30)).build().unwrap_or_default();
+            let found = get(&http, &format!("/account/{id}/profile"), &[]).ok().map(|v| {
+                match v["profilePictureUrl"].as_str().and_then(|url| fetch_picture(&http, url).ok()) {
+                    Some(img) => Avatar::Picture(Some(img), None),
+                    None => Avatar::Colour(default_avatar_color(&text(&v["avatarSourceKey"]))),
+                }
+            });
+            AVATARS.lock().unwrap().insert(id, found.unwrap_or(Avatar::Colour(default_avatar_color(""))));
+            ctx.request_repaint();
+        });
+        Avatar::Loading
+    });
+    if let Avatar::Picture(img, tex) = entry
+        && tex.is_none()
+        && let Some(img) = img.take()
+    {
+        *tex = Some(ui.ctx().load_texture(format!("avatar_{id}"), img, egui::TextureOptions::LINEAR));
+    }
+    let colour = match entry {
+        Avatar::Picture(_, Some(tex)) => {
+            let tex = tex.clone();
+            drop(avatars);
+            ui.put(rect, egui::Image::new(&tex).fit_to_exact_size(rect.size()).corner_radius(CornerRadius::same((size / 2.0) as u8)));
+            return;
+        }
+        Avatar::Colour(c) => *c,
+        _ => ui.visuals().widgets.inactive.bg_fill,
+    };
+    drop(avatars);
+    ui.painter().circle_filled(rect.center(), size / 2.0, colour);
+    let initial = name.chars().next().map(|c| c.to_uppercase().to_string()).unwrap_or_default();
+    ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, initial, egui::FontId::proportional(size * 0.46), Color32::WHITE);
+}
+
 /// The profile's top card: picture, name, overall rank, when they joined and a link.
 fn header_card(ui: &mut egui::Ui, p: &Profile, avatar: Option<&egui::TextureHandle>) {
     let accent = theme::accent();
@@ -1101,12 +1262,14 @@ fn header_card(ui: &mut egui::Ui, p: &Profile, avatar: Option<&egui::TextureHand
         .inner_margin(egui::Margin::same(14))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
-            ui.horizontal(|ui| {
+            // A row as tall as the picture, so everything in it is centred on the same line.
+            let dir = if crate::i18n::rtl() { egui::Layout::right_to_left(egui::Align::Center) } else { egui::Layout::left_to_right(egui::Align::Center) };
+            ui.allocate_ui_with_layout(vec2(ui.available_width(), 64.0), dir, |ui| {
                 avatar_circle(ui, p, avatar, 64.0);
                 ui.add_space(8.0);
-                ui.vertical(|ui| {
+                crate::theme::vcol(ui, |ui| {
                     ui.label(RichText::new(&p.name).size(26.0).strong());
-                    ui.horizontal_wrapped(|ui| {
+                    crate::theme::hrow_wrapped(ui, |ui| {
                         if let Some(rank) = p.stats.first().and_then(|s| s.rank) {
                             theme::tag(ui, &format!("🏆 {}", top_percent(rank, p.players)), accent)
                                 .on_hover_text(tr!("#{rank} of {players} players by total score", rank = thousands(rank), players = thousands(p.players)));
@@ -1120,19 +1283,33 @@ fn header_card(ui: &mut egui::Ui, p: &Profile, avatar: Option<&egui::TextureHand
                         }
                     });
                 });
+                // Submissions, on the right of the card.
+                ui.with_layout(crate::theme::trailing(), |ui| {
+                    crate::theme::vcol(ui, |ui| {
+                        ui.with_layout(egui::Layout::top_down(egui::Align::Max), |ui| {
+                            ui.label(RichText::new(thousands(p.submissions)).size(24.0).strong().color(accent));
+                            ui.weak(t("📤 Submissions"));
+                        });
+                    })
+                    .response
+                    .on_hover_text(t("Scores this player has submitted to the Clone Hero leaderboards"));
+                });
             });
         });
 }
 
 /// Tiles in rows of as many as fit, each row top-aligned.
-fn tile_rows<T>(ui: &mut egui::Ui, z: Sizes, items: &[T], mut tile: impl FnMut(&mut egui::Ui, &T)) {
+fn tile_rows<T>(ui: &mut egui::Ui, z: Sizes, items: &[T], mut tile: impl FnMut(&mut egui::Ui, usize, &T, f32)) {
     let gap = 8.0;
-    let columns = ((ui.available_width() + gap) / (z.tile + gap)).floor().max(1.0) as usize;
-    for chunk in items.chunks(columns) {
+    let avail = ui.available_width();
+    let columns = ((avail + gap) / (z.tile + gap)).floor().max(1.0) as usize;
+    // Stretch the tiles so each row fills the width exactly.
+    let width = ((avail + gap) / columns as f32 - gap).floor();
+    for (r, chunk) in items.chunks(columns).enumerate() {
         ui.horizontal_top(|ui| {
             ui.spacing_mut().item_spacing.x = gap;
-            for item in chunk {
-                tile(ui, item);
+            for (c, item) in chunk.iter().enumerate() {
+                tile(ui, r * columns + c, item, width);
             }
         });
         ui.add_space(gap);
@@ -1140,18 +1317,63 @@ fn tile_rows<T>(ui: &mut egui::Ui, z: Sizes, items: &[T], mut tile: impl FnMut(&
 }
 
 /// One stat as a tile: an icon, its name, its value and how it ranks.
-fn stat_tile(ui: &mut egui::Ui, z: Sizes, s: &Stat, players: u64) {
-    egui::Frame::new()
-        .fill(ui.visuals().widgets.inactive.bg_fill)
+/// Tile colours (decoration only, each tile its own): blue, orange, green, amber, pink, violet,
+/// teal, red.
+const TILE_COLOURS: [Color32; 8] = [
+    Color32::from_rgb(57, 135, 229),
+    Color32::from_rgb(217, 89, 38),
+    Color32::from_rgb(25, 158, 112),
+    Color32::from_rgb(201, 133, 0),
+    Color32::from_rgb(213, 81, 129),
+    Color32::from_rgb(124, 84, 210),
+    Color32::from_rgb(20, 150, 170),
+    Color32::from_rgb(210, 60, 60),
+];
+
+/// A rounded rectangle filled with a diagonal gradient from `from` (top left) to `to`.
+fn gradient_rect(rect: egui::Rect, radius: f32, from: Color32, to: Color32) -> egui::Shape {
+    // The outline: each corner as a few points on its arc.
+    let mut outline = Vec::new();
+    for (corner, start) in [
+        (egui::pos2(rect.right() - radius, rect.top() + radius), -90.0f32),
+        (egui::pos2(rect.right() - radius, rect.bottom() - radius), 0.0),
+        (egui::pos2(rect.left() + radius, rect.bottom() - radius), 90.0),
+        (egui::pos2(rect.left() + radius, rect.top() + radius), 180.0),
+    ] {
+        for step in 0..=6 {
+            let a = (start + step as f32 * 15.0).to_radians();
+            outline.push(corner + vec2(a.cos(), a.sin()) * radius);
+        }
+    }
+    let colour = |p: egui::Pos2| {
+        let f = ((p.x - rect.left()) / rect.width() * 0.6 + (p.y - rect.top()) / rect.height() * 0.4).clamp(0.0, 1.0);
+        from.lerp_to_gamma(to, f)
+    };
+    let mut mesh = egui::Mesh::default();
+    mesh.colored_vertex(rect.center(), colour(rect.center()));
+    for p in &outline {
+        mesh.colored_vertex(*p, colour(*p));
+    }
+    let n = outline.len() as u32;
+    for i in 0..n {
+        mesh.add_triangle(0, 1 + i, 1 + (i + 1) % n);
+    }
+    egui::Shape::mesh(mesh)
+}
+
+fn stat_tile(ui: &mut egui::Ui, z: Sizes, k: usize, s: &Stat, players: u64, width: f32) {
+    // A gradient in the tile's own colour, painted behind it once its size is known.
+    let colour = TILE_COLOURS[k % TILE_COLOURS.len()];
+    let background = ui.painter().add(egui::Shape::Noop);
+    let tile = egui::Frame::new()
         .corner_radius(CornerRadius::same(8))
         .inner_margin(egui::Margin::symmetric(10, 8))
         .show(ui, |ui| {
-            ui.set_width(z.tile - 20.0);
-            ui.horizontal(|ui| {
-                let (rect, _) = ui.allocate_exact_size(vec2(34.0, 34.0), Sense::hover());
-                ui.painter().circle_filled(rect.center(), 17.0, theme::accent().linear_multiply(0.18));
-                ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, s.icon, egui::FontId::proportional(16.0), ui.visuals().strong_text_color());
-                ui.vertical(|ui| {
+            ui.set_width(width - 20.0);
+            crate::theme::hrow(ui, |ui| {
+                // The icon's column; it's drawn once the text beside it is laid out, centred on it.
+                let (column, _) = ui.allocate_exact_size(vec2(34.0, 1.0), Sense::hover());
+                let body = crate::theme::vcol(ui, |ui| {
                     ui.spacing_mut().item_spacing.y = 2.0;
                     plain(ui, RichText::new(t(s.label)).size(z.text - 1.0).weak());
                     // Big numbers shrink to fit rather than being cut short.
@@ -1170,16 +1392,22 @@ fn stat_tile(ui: &mut egui::Ui, z: Sizes, s: &Stat, players: u64) {
                         None => {}
                     }
                 });
+                let centre = egui::pos2(column.center().x, body.response.rect.center().y);
+                ui.painter().circle_filled(centre, 17.0, colour.linear_multiply(0.35));
+                ui.painter().text(centre, egui::Align2::CENTER_CENTER, s.icon, egui::FontId::proportional(16.0), Color32::WHITE);
             });
         });
+    let rect = tile.response.rect;
+    ui.painter().set(background, gradient_rect(rect, 8.0, colour.linear_multiply(0.42), colour.linear_multiply(0.08)));
+    ui.painter().rect_stroke(rect, 8.0, egui::Stroke::new(1.0, colour.linear_multiply(0.5)), egui::StrokeKind::Inside);
 }
 
 /// The two players' stats as donuts: each stat's share of their combined total.
-fn compare_view(ui: &mut egui::Ui, a: &Profile, b: &Profile, a_tex: Option<&egui::TextureHandle>, b_tex: Option<&egui::TextureHandle>, z: Sizes) {
-    // Who's who.
-    ui.horizontal(|ui| {
-        for (k, (p, tex)) in [(a, a_tex), (b, b_tex)].into_iter().enumerate() {
-            avatar_circle(ui, p, tex, 26.0);
+fn compare_view(ui: &mut egui::Ui, players: &[(&Profile, Option<&egui::TextureHandle>)], z: Sizes) {
+    // Who's who, each in their colour.
+    crate::theme::hrow_wrapped(ui, |ui| {
+        for (k, (p, tex)) in players.iter().enumerate() {
+            avatar_circle(ui, p, *tex, 26.0);
             let (r, _) = ui.allocate_exact_size(vec2(12.0, 12.0), Sense::hover());
             ui.painter().rect_filled(r, CornerRadius::same(3), series(k));
             plain(ui, RichText::new(&p.name).size(z.text + 1.0).strong());
@@ -1187,38 +1415,44 @@ fn compare_view(ui: &mut egui::Ui, a: &Profile, b: &Profile, a_tex: Option<&egui
         }
     });
     ui.add_space(6.0);
-    let card = (z.tile * 0.8).max(150.0);
-    ui.horizontal_wrapped(|ui| {
-        ui.spacing_mut().item_spacing = vec2(8.0, 8.0);
-        for (sa, sb) in a.stats.iter().zip(&b.stats) {
-            egui::Frame::new()
-                .fill(ui.visuals().widgets.inactive.bg_fill)
-                .corner_radius(CornerRadius::same(8))
-                .inner_margin(egui::Margin::same(10))
-                .show(ui, |ui| {
-                    ui.set_width(card - 20.0);
-                    ui.vertical_centered(|ui| {
-                        ui.spacing_mut().item_spacing.y = 4.0;
-                        plain(ui, RichText::new(format!("{}  {}", sa.icon, t(sa.label))).size(z.text - 0.5).weak());
-                        let total = (sa.value + sb.value).max(1) as f32;
-                        let share_a = sa.value as f32 / total;
-                        let d = (card - 50.0).clamp(70.0, 120.0);
-                        let (rect, resp) = ui.allocate_exact_size(vec2(d, d), Sense::hover());
-                        donut(ui.painter(), rect.center(), d / 2.0, d / 2.0 * 0.62, &[(share_a, series(0)), (1.0 - share_a, series(1))]);
-                        let lead = if sa.value >= sb.value { (share_a, 0) } else { (1.0 - share_a, 1) };
-                        ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, format!("{:.0}%", lead.0 * 100.0), egui::FontId::proportional(16.0), series(lead.1));
-                        resp.on_hover_text(format!("{}: {:.1}%\n{}: {:.1}%", a.name, share_a * 100.0, b.name, (1.0 - share_a) * 100.0));
-                        for (k, (p, s, o)) in [(a, sa, sb), (b, sb, sa)].into_iter().enumerate() {
-                            ui.horizontal(|ui| {
-                                let (r, _) = ui.allocate_exact_size(vec2(10.0, 10.0), Sense::hover());
-                                ui.painter().rect_filled(r, CornerRadius::same(2), series(k));
-                                let ahead = if s.value > o.value { " ▲" } else { "" };
-                                plain(ui, RichText::new(format!("{}{ahead}", s.shown)).size(z.text).strong()).on_hover_text(&p.name);
-                            });
-                        }
-                    });
+    // One card per stat: a donut of each player's share, then their values (▲ the most). The
+    // cards wrap into as many columns as fit, stretched to the width.
+    let stats = players[0].0.stats.len();
+    let indices: Vec<usize> = (0..stats).collect();
+    let card_z = Sizes { tile: (z.tile * 0.8).max(160.0), ..z };
+    tile_rows(ui, card_z, &indices, |ui, _, &i, width| {
+        egui::Frame::new()
+            .fill(ui.visuals().widgets.inactive.bg_fill)
+            .corner_radius(CornerRadius::same(8))
+            .inner_margin(egui::Margin::same(10))
+            .show(ui, |ui| {
+                ui.set_width(width - 20.0);
+                ui.vertical_centered(|ui| {
+                    ui.spacing_mut().item_spacing.y = 4.0;
+                    let first = &players[0].0.stats[i];
+                    plain(ui, RichText::new(format!("{}  {}", first.icon, t(first.label))).size(z.text - 0.5).weak());
+                    let values: Vec<u64> = players.iter().map(|(p, _)| p.stats.get(i).map_or(0, |s| s.value)).collect();
+                    let total = values.iter().sum::<u64>().max(1) as f32;
+                    let best = values.iter().copied().max().unwrap_or(0);
+                    let lead = values.iter().position(|&v| v == best).unwrap_or(0);
+                    let d = (width - 70.0).clamp(70.0, 120.0);
+                    let (rect, resp) = ui.allocate_exact_size(vec2(d, d), Sense::hover());
+                    let parts: Vec<(f32, Color32)> = values.iter().enumerate().map(|(k, &v)| (v as f32 / total, series(k))).collect();
+                    donut(ui.painter(), rect.center(), d / 2.0, d / 2.0 * 0.62, &parts);
+                    ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, format!("{:.0}%", best as f32 / total * 100.0), egui::FontId::proportional(16.0), series(lead));
+                    let tip: Vec<String> = players.iter().zip(&values).map(|((p, _), &v)| format!("{}: {:.1}%", p.name, v as f32 / total * 100.0)).collect();
+                    resp.on_hover_text(tip.join("\n"));
+                    for (k, (p, _)) in players.iter().enumerate() {
+                        let shown = p.stats.get(i).map_or_else(String::new, |s| s.shown.clone());
+                        crate::theme::hrow(ui, |ui| {
+                            let (r, _) = ui.allocate_exact_size(vec2(10.0, 10.0), Sense::hover());
+                            ui.painter().rect_filled(r, CornerRadius::same(2), series(k));
+                            let ahead = if values[k] == best && best > 0 && players.len() > 1 { " ▲" } else { "" };
+                            plain(ui, RichText::new(format!("{shown}{ahead}")).size(z.text).strong()).on_hover_text(&p.name);
+                        });
+                    }
                 });
-        }
+            });
     });
 }
 
@@ -1252,13 +1486,42 @@ fn donut(painter: &egui::Painter, centre: egui::Pos2, outer: f32, inner: f32, pa
 
 /// A full-width list row: striped odd/even, tinted when hovered (if clickable) or `selected`.
 fn row(ui: &mut egui::Ui, k: usize, height: f32, clickable: bool, selected: bool, add: impl FnOnce(&mut egui::Ui)) -> egui::Response {
+    row_ex(ui, k, height, clickable, selected, None, add)
+}
+
+/// The medal colours for first, second and third place.
+pub fn medal(place: u64) -> Option<Color32> {
+    match place {
+        1 => Some(Color32::from_rgb(240, 190, 40)),
+        2 => Some(Color32::from_rgb(190, 195, 205)),
+        3 => Some(Color32::from_rgb(205, 125, 60)),
+        _ => None,
+    }
+}
+
+/// A gold, silver or bronze background fading from the left, for the top three places.
+pub fn podium_background(rect: egui::Rect, place: u64) -> Option<egui::Shape> {
+    let c = medal(place)?;
+    Some(gradient_rect(rect, 6.0, c.linear_multiply(0.38), c.linear_multiply(0.04)))
+}
+
+/// A list row for a ranking: the top three get a gold, silver or bronze gradient.
+fn ranked_row(ui: &mut egui::Ui, k: usize, height: f32, selected: bool, place: u64, add: impl FnOnce(&mut egui::Ui)) -> egui::Response {
+    row_ex(ui, k, height, true, selected, Some(place), add)
+}
+
+fn row_ex(ui: &mut egui::Ui, k: usize, height: f32, clickable: bool, selected: bool, place: Option<u64>, add: impl FnOnce(&mut egui::Ui)) -> egui::Response {
     let sense = if clickable { Sense::click() } else { Sense::hover() };
     let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), height), sense);
+    if let Some(shape) = place.and_then(|p| podium_background(rect, p)) {
+        ui.painter().add(shape);
+    }
+    let podium = place.is_some_and(|p| p <= 3);
     let fill = if selected {
         theme::accent().linear_multiply(0.28)
     } else if clickable && resp.hovered() {
         theme::accent().linear_multiply(0.14)
-    } else if k % 2 == 0 {
+    } else if k % 2 == 0 && !podium {
         ui.visuals().widgets.inactive.bg_fill
     } else {
         Color32::TRANSPARENT
@@ -1314,24 +1577,30 @@ struct ScoreLine<'a> {
     placement: Option<(u64, u64)>,
     /// More about the run, for the breakdown tooltip.
     detail: Option<String>,
+    /// The song's album art (an Encore art id), if the catalogue has it.
+    art: Option<&'a str>,
 }
 
 /// A score as a two-line row: the song (and player) with the score on the right, then an
 /// accuracy bar, stars, FC and placement. `parts` adds a breakdown tooltip to the score.
-fn score_row(ui: &mut egui::Ui, k: usize, z: Sizes, s: &ScoreLine, parts: Option<&[u64; 6]>) -> egui::Response {
+/// Also returns whether its "Find song" button was clicked (which searches Charts for it).
+fn score_row(ui: &mut egui::Ui, k: usize, z: Sizes, s: &ScoreLine, parts: Option<&[u64; 6]>, covers: &mut crate::covers::Covers) -> (egui::Response, bool) {
     let height = z.row * 1.7 + 14.0;
-    row(ui, k, height, true, false, |ui| {
+    let mut find = false;
+    let resp = row(ui, k, height, true, false, |ui| {
+        // The album cover (or a note), then the instrument.
+        crate::cover(ui, covers, s.art, height - 12.0, crate::covers::THUMB);
         plain(ui, RichText::new(instrument_icon(s.instrument)).size(z.text + 6.0));
         ui.add_space(4.0);
-        ui.vertical(|ui| {
+        crate::theme::vcol(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 3.0;
-            ui.horizontal(|ui| {
+            crate::theme::hrow(ui, |ui| {
                 if let Some(who) = &s.who {
                     plain(ui, RichText::new(who).size(z.text).strong().color(theme::accent()));
                 }
                 plain(ui, RichText::new(&s.title).size(z.text).strong());
             });
-            ui.horizontal(|ui| {
+            crate::theme::hrow(ui, |ui| {
                 ui.spacing_mut().item_spacing.x = 8.0;
                 let acc: f32 = s.accuracy.parse().unwrap_or(0.0);
                 let color = if s.pfc { theme::warn() } else if s.fc { theme::good() } else { theme::accent() };
@@ -1339,7 +1608,8 @@ fn score_row(ui: &mut egui::Ui, k: usize, z: Sizes, s: &ScoreLine, parts: Option
                 plain(ui, RichText::new(format!("{}%", s.accuracy)).size(z.text - 1.0).strong());
                 plain(ui, RichText::new(format!("★ {}", s.stars)).size(z.text - 1.0).color(Color32::from_rgb(240, 190, 40)));
                 if s.pfc {
-                    theme::tag(ui, "PFC", theme::warn());
+                    // A crown, as Clone Hero shows for a perfect full combo.
+                    theme::tag(ui, "👑 PFC", theme::warn());
                 } else if s.fc {
                     theme::tag(ui, "FC", theme::good());
                 }
@@ -1347,7 +1617,7 @@ fn score_row(ui: &mut egui::Ui, k: usize, z: Sizes, s: &ScoreLine, parts: Option
                 plain(ui, RichText::new(s.when).size(z.text - 1.5).weak());
             });
         });
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        ui.with_layout(crate::theme::trailing(), |ui| {
             let score = plain(ui, RichText::new(thousands(s.score)).size(z.text + 1.0).monospace().strong());
             if let Some(parts) = parts {
                 score.on_hover_ui(|ui| {
@@ -1366,8 +1636,12 @@ fn score_row(ui: &mut egui::Ui, k: usize, z: Sizes, s: &ScoreLine, parts: Option
                 plain(ui, RichText::new(text).size(z.text - 1.0).weak()).on_hover_text(top_percent(place, of));
                 place_badge(ui, place);
             }
+            ui.add_space(8.0);
+            let button = ui.add(egui::Button::new(RichText::new(t("🔍 Find song")).size(z.text - 1.0)).min_size(vec2(0.0, 26.0)));
+            find = button.on_hover_text(t("Search Charts for this song")).clicked();
         });
-    })
+    });
+    (resp, find)
 }
 
 /// A stacked bar of a score's parts with a legend that gives each part's points.
@@ -1393,12 +1667,12 @@ fn stacked_bar(ui: &mut egui::Ui, parts: &[u64; 6]) {
     }
     ui.add_space(4.0);
     for &(k, v) in &shown {
-        ui.horizontal(|ui| {
+        crate::theme::hrow(ui, |ui| {
             ui.spacing_mut().item_spacing.x = 6.0;
             let (r, _) = ui.allocate_exact_size(vec2(10.0, 10.0), Sense::hover());
             ui.painter().rect_filled(r, CornerRadius::same(2), series(k));
             ui.label(RichText::new(t(PARTS[k])).size(12.5));
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.with_layout(crate::theme::trailing(), |ui| {
                 ui.label(RichText::new(format!("{}  ({:.0}%)", thousands(v), v as f64 / total as f64 * 100.0)).size(12.5).monospace());
             });
         });
@@ -1407,7 +1681,7 @@ fn stacked_bar(ui: &mut egui::Ui, parts: &[u64; 6]) {
 
 /// A dropdown for which stat to rank players by.
 fn metric_picker(ui: &mut egui::Ui, id: &str, metric: &mut usize) {
-    ui.horizontal(|ui| {
+    crate::theme::hrow(ui, |ui| {
         ui.label(RichText::new(t("Ranked by")).weak());
         let (_, icon, label) = METRICS[*metric];
         egui::ComboBox::from_id_salt(id).selected_text(format!("{icon}  {}", t(label))).width(170.0).show_ui(ui, |ui| {
@@ -1433,18 +1707,43 @@ fn show_load<T: Send + 'static>(ui: &mut egui::Ui, load: &mut Load<T>, add: impl
 
 /// A placement: a trophy in gold, silver or bronze for the top three, else "#n".
 pub fn place_badge(ui: &mut egui::Ui, place: u64) {
-    let color = match place {
-        1 => Color32::from_rgb(240, 190, 40),
-        2 => Color32::from_rgb(190, 195, 205),
-        3 => Color32::from_rgb(205, 125, 60),
-        _ => ui.visuals().weak_text_color(),
-    };
+    let color = medal(place).unwrap_or(ui.visuals().weak_text_color());
     let (rect, _) = ui.allocate_exact_size(vec2(34.0, 20.0), Sense::hover());
     if place <= 3 {
         ui.painter().text(rect.left_center(), egui::Align2::LEFT_CENTER, "🏆", egui::FontId::proportional(15.0), color);
         ui.painter().text(rect.right_center() - vec2(4.0, 0.0), egui::Align2::RIGHT_CENTER, place.to_string(), egui::FontId::proportional(12.5), color);
     } else {
         ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, format!("#{place}"), egui::FontId::proportional(12.5), color);
+    }
+}
+
+/// `key:"value"` for the Charts search (quotes dropped from the value).
+fn field_query(key: &str, value: &str) -> String {
+    format!("{key}:\"{}\"", value.replace('"', "").trim())
+}
+
+/// A Charts search for exactly this song: its name and artist, and its charter if known.
+fn song_query(name: &str, artist: &str, charter: Option<&str>) -> String {
+    let mut q = vec![field_query("n", name), field_query("a", artist)];
+    if let Some(ch) = charter.filter(|c| !c.trim().is_empty()) {
+        q.push(field_query("ch", ch));
+    }
+    q.join(" ")
+}
+
+/// The profile being shown (id and name), for Back and Forward.
+impl Players {
+    pub fn current_profile(&self) -> Option<(u64, String)> {
+        self.window.as_ref().map(|w| (w.id, w.name.clone()))
+    }
+
+    /// Shows a profile again from Back or Forward (not added to the profile's own history).
+    pub fn return_to(&mut self, ctx: &egui::Context, profile: Option<(u64, String)>) {
+        match profile {
+            Some((id, name)) if self.window.as_ref().is_none_or(|w| w.id != id) => self.show_profile(ctx, id, name),
+            Some(_) => {}
+            None => self.window = None,
+        }
     }
 }
 

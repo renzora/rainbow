@@ -42,6 +42,11 @@ pub struct Contents {
 }
 
 impl Contents {
+    /// The metadata as song.ini text.
+    pub fn ini(&self) -> &str {
+        &self.ini
+    }
+
     fn data(&self, data: &[u8], offset: usize, len: usize) -> Result<Vec<u8>> {
         let end = offset.checked_add(len).filter(|&e| e <= data.len()).context("truncated .sng file data")?;
         Ok(self.unmask(&data[offset..end]))
@@ -54,6 +59,7 @@ impl Contents {
 }
 
 /// The song.ini text, and the first file in the .sng whose (lowercase) name is in `names`.
+#[cfg(test)]
 pub fn read_file(data: &[u8], names: &[&str]) -> Result<(String, Option<(String, Vec<u8>)>)> {
     let c = contents(data)?;
     for want in names {

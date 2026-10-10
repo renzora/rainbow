@@ -207,6 +207,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "ar-reshaper"
+version = "1.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "08dae85b57b725df143d5a2eb92c032dd032f062a636826fda1e1a4b21c40c03"
+
+[[package]]
 name = "arboard"
 version = "3.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3222,9 +3228,10 @@ checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 
 [[package]]
 name = "rainbow"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
+ "ar-reshaper",
  "arboard",
  "blake3",
  "dirs",
@@ -3241,6 +3248,7 @@ dependencies = [
  "sha2",
  "sys-locale",
  "tar",
+ "unicode-bidi",
  "vorbis_rs",
  "winresource",
  "zip",

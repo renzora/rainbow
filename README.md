@@ -71,8 +71,9 @@ new one, and name the file after the language code, e.g. `pt-PT.json`. For contr
 - `python tools/subset_cjk.py <fonts folder>` rebuilds the small Korean and Chinese fonts
   after their translations change.
 
-Right-to-left and complex scripts (Arabic, Hebrew, Hindi, Thai) aren't supported yet,
-because the UI library can't lay them out correctly.
+Arabic is supported, with the layout mirrored right to left: the UI library can't join
+Arabic letters or lay text out right to left, so Rainbow does that itself (`src/i18n.rs`).
+Other complex scripts (Hindi, Thai) aren't supported yet.
 
 ## Fonts
 
@@ -120,4 +121,5 @@ inclusion in the work by you, as defined in the Apache-2.0 license, shall be dua
 as above, without any additional terms or conditions.
 
 The bundled fonts in `assets/fonts` keep their own SIL Open Font License (see the `OFL*.txt`
-files there).
+files there). The flags in `assets/flags` are from flag-icons, under the MIT License (see the
+`LICENSE` file there).

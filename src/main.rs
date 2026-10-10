@@ -9,11 +9,13 @@ mod rockband;
 mod covers;
 mod drums;
 mod dta;
+mod flags;
 mod filter;
 mod games;
 mod i18n;
 mod import;
 mod leaderboard;
+mod links;
 mod optimal;
 mod players;
 mod pathchart;
@@ -61,6 +63,14 @@ const RENZORA_PNG: &[u8] = include_bytes!("../assets/renzora.png");
 const RENZORA_URL: &str = "https://github.com/renzora";
 
 fn main() -> eframe::Result {
+    // Opened from a rainbow:// link while Rainbow is already running: pass it over and stop.
+    let link = links::from_args();
+    if let Some(id) = &link
+        && links::hand_over(id)
+    {
+        return Ok(());
+    }
+    std::thread::spawn(links::register);
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("Rainbow")
@@ -69,7 +79,7 @@ fn main() -> eframe::Result {
             .with_icon(eframe::icon_data::from_png_bytes(LOGO_PNG).unwrap_or_default()),
         ..Default::default()
     };
-    eframe::run_native("Rainbow", options, Box::new(|cc| Ok(Box::new(App::new(&cc.egui_ctx)))))
+    eframe::run_native("Rainbow", options, Box::new(move |cc| Ok(Box::new(App::new(&cc.egui_ctx, link)))))
 }
 
 /// Messages from background threads to the UI.
@@ -85,6 +95,8 @@ enum Msg {
     Status(String),
     Log(String),
     JobDone,
+    /// A rainbow:// link to open (a chart id: an MD5 or the start of one).
+    OpenLink(String),
 }
 
 enum CatStatus {
@@ -100,6 +112,9 @@ struct Job {
     downloaded: usize,
     failed: usize,
     file: Option<(String, u64, Option<u64>)>,
+    /// For the time left: when it started, and how many charts weren't downloaded already.
+    started: Instant,
+    to_get: usize,
 }
 
 /// A download that was still running, saved so it carries on when Rainbow is reopened.
@@ -229,12 +244,14 @@ struct App {
     /// Blurred screenshot shown behind the chart preview, and whether one was requested.
     backdrop: Option<egui::TextureHandle>,
     backdrop_requested: bool,
-    /// Measured widths of the results toolbar's two halves.
-    toolbar_w: (f32, f32),
     /// Measured width of the controls beside the search box.
     search_controls_w: f32,
     /// Row to scroll into view (keyboard navigation).
     scroll_to: Option<usize>,
+    /// The first results row drawn last frame, to keep in place while the cover column (and
+    /// with it the row height) is being resized.
+    first_row: usize,
+    cover_dragging: bool,
     /// Bumped to reset the results table's column widths.
     table_gen: u32,
     table_density: Option<Density>,
@@ -265,6 +282,22 @@ struct App {
     players: players::Players,
     /// The tab a profile was opened from, for the Players tab's Back button.
     prev_tab: Option<Tab>,
+    /// A chart from a link, waiting to be found in the catalogue.
+    pending_link: Option<String>,
+    /// Bring the window to the front (a link was opened).
+    focus_window: bool,
+    /// How compact the results toolbar and status bar are drawn (0 = in full), and the width
+    /// each needed at each level when last drawn (0 = not measured yet).
+    toolbar_level: usize,
+    toolbar_widths: [f32; 4],
+    status_level: usize,
+    status_widths: [f32; 4],
+    /// Search history for Back and Forward: earlier and later searches, the one being shown,
+    /// and when the filters last changed (a change counts once it's been left alone a moment).
+    nav_back: Vec<Place>,
+    nav_forward: Vec<Place>,
+    nav_current: Place,
+    nav_changed: Option<Instant>,
     /// New versions from GitHub.
     updates: updater::Updates,
     /// The Report an issue pop-up.
@@ -292,8 +325,17 @@ fn now() -> u64 {
 }
 
 impl App {
-    fn new(ctx: &egui::Context) -> Self {
+    fn new(ctx: &egui::Context, link: Option<String>) -> Self {
         let (tx, rx) = channel();
+        // Links opened while Rainbow is running come from the copies they start.
+        let (link_tx, link_ctx) = (tx.clone(), ctx.clone());
+        links::listen(move |id| {
+            let _ = link_tx.send(Msg::OpenLink(id));
+            link_ctx.request_repaint();
+        });
+        if let Some(id) = link {
+            let _ = tx.send(Msg::OpenLink(id));
+        }
         let status_tx = tx.clone();
         let repaint = ctx.clone();
         let client = Client::new().expect("failed to create HTTP client").with_status(Arc::new(move |m| {
@@ -301,6 +343,7 @@ impl App {
             repaint.request_repaint();
         }));
         let settings = Settings::load();
+        let default_sort = settings.default_sort;
         i18n::set_language(&settings.language);
         theme::apply(ctx, settings.theme, settings.zoom, settings.access());
         theme::install_fonts(ctx, settings.font, &i18n::current());
@@ -332,17 +375,18 @@ impl App {
             index: Index::default(),
             results: Vec::new(),
             searched: None,
-            filters: Filters::default(),
+            filters: Filters { sort: default_sort, ..Filters::default() },
             show_advanced: false,
             show_log: false,
             show_shortcuts: false,
             backdrop: None,
             backdrop_requested: false,
-            toolbar_w: (760.0, 520.0),
             search_controls_w: 560.0,
             scroll_to: None,
             table_gen: 0,
             table_density: None,
+            first_row: 0,
+            cover_dragging: false,
             search_bottom: 0.0,
             cat_complete: false,
             cat_updated: 0,
@@ -363,6 +407,16 @@ impl App {
             leaderboard: leaderboard::Panel::new(),
             players: players::Players::new(),
             prev_tab: None,
+            pending_link: None,
+            focus_window: false,
+            toolbar_level: 0,
+            toolbar_widths: [0.0; 4],
+            status_level: 0,
+            status_widths: [0.0; 4],
+            nav_back: Vec::new(),
+            nav_forward: Vec::new(),
+            nav_current: Place { tab: Tab::Browse, filters: Filters { sort: default_sort, ..Filters::default() }, profile: None },
+            nav_changed: None,
             updates: updater::Updates::new(),
             show_report: false,
             errors_seen: 0,
@@ -468,7 +522,8 @@ impl App {
         let hashes: Vec<String> = query
             .split_whitespace()
             .filter_map(filter::hash_in)
-            .filter(|h| !self.known.contains(h))
+            // Encore can only look up whole MD5s (a link may have just the start of one).
+            .filter(|h| h.len() == 32 && !self.known.contains(h))
             .collect();
         if self.cat_complete && hashes.is_empty() {
             return;
@@ -827,6 +882,10 @@ impl App {
         let delay =
             if charts.len() > BULK { Duration::from_secs_f32(self.settings.delay_secs) } else { Duration::ZERO };
         self.stop.store(false, Ordering::Relaxed);
+        let to_get = {
+            let m = self.manifest.lock().unwrap();
+            charts.iter().filter(|c| !m.contains(&c.md5)).count()
+        };
         self.job = Some(Job {
             title: title.clone(),
             total: charts.len(),
@@ -834,6 +893,8 @@ impl App {
             downloaded: 0,
             failed: 0,
             file: None,
+            started: Instant::now(),
+            to_get,
         });
         let mut w = Worker {
             client: self.client.clone(),
@@ -952,6 +1013,13 @@ impl App {
                     self.status = Some((s, Instant::now()));
                 }
                 Msg::Log(line) => self.log(line),
+                Msg::OpenLink(id) => {
+                    self.log(format!("Opening shared chart {id}"));
+                    self.pending_link = Some(id);
+                    self.tab = Tab::Browse;
+                    self.preview = None;
+                    self.focus_window = true;
+                }
                 Msg::JobDone => {
                     // Quitting mid-download leaves it saved for next time; finishing or Stop clears it.
                     if !self.quit_confirmed {
@@ -960,7 +1028,7 @@ impl App {
                     if let Some(job) = self.job.take() {
                         let how = if self.stop.load(Ordering::Relaxed) { "Stopped" } else { "Finished" };
                         self.log(format!(
-                            "{how}: {}: {} downloaded, {} already had, {} failed",
+                            "{how}: {}: {} downloaded, {} in library, {} failed",
                             job.title,
                             job.downloaded,
                             job.checked - job.downloaded - job.failed,
@@ -975,11 +1043,19 @@ impl App {
     // ─────────────────────────────── Header ───────────────────────────────
 
     fn header(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
+        crate::theme::hrow(ui, |ui| {
             if let Some(logo) = &self.logo {
                 ui.add(egui::Image::new(logo).fit_to_exact_size(vec2(36.0, 36.0)).corner_radius(CornerRadius::same(9)));
             }
-            ui.label(theme::title(24.0));
+            // The gradient drifts slowly through the word (once every 12 s), unless motion is
+            // reduced; a few repaints a second are enough for something this slow.
+            let phase = if self.settings.reduce_motion {
+                0.0
+            } else {
+                ui.ctx().request_repaint_after(Duration::from_millis(60));
+                (ui.input(|i| i.time) / 12.0).fract() as f32
+            };
+            ui.label(theme::title(24.0, phase));
             ui.add_space(18.0);
             for (tab, label) in [
                 (Tab::Browse, n("🎵  Charts")),
@@ -999,11 +1075,11 @@ impl App {
                     self.tab = tab;
                 }
             }
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.with_layout(crate::theme::trailing(), |ui| {
                 credit(ui, self.renzora.as_ref(), 26.0);
                 ui.add_space(12.0);
                 if let Some(job) = &self.job {
-                    ui.add(egui::ProgressBar::new(job.checked as f32 / job.total.max(1) as f32).desired_width(140.0).show_percentage());
+                    ui.add(crate::theme::Bar::new(job.checked as f32 / job.total.max(1) as f32).desired_width(140.0).show_percentage());
                     ui.label(RichText::new(format!("⬇ {}", job.downloaded)).color(theme::good()));
                 }
             });
@@ -1014,7 +1090,15 @@ impl App {
     // ───────────────────────────── Browse tab ─────────────────────────────
 
     fn search_bar(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
+        crate::theme::hrow(ui, |ui| {
+            // Back and Forward through earlier searches (greyed out when there's nowhere to go).
+            let back = self.nav_back.len() + usize::from(self.place() != self.nav_current) > 0;
+            if nav_arrow(ui, true, back).on_hover_text(t("Back (Alt+←)")).clicked() {
+                self.go_back(ui.ctx());
+            }
+            if nav_arrow(ui, false, !self.nav_forward.is_empty()).on_hover_text(t("Forward (Alt+→)")).clicked() {
+                self.go_forward(ui.ctx());
+            }
             let resp = ui.add(
                 egui::TextEdit::singleline(&mut self.filters.query)
                     .id(egui::Id::new("search"))
@@ -1036,7 +1120,7 @@ impl App {
             if text_menu(&resp, &mut self.filters.query) || resp.changed() {
                 self.live_edited = Instant::now();
             }
-            if !self.filters.query.is_empty() && clear_button(ui, resp.rect) {
+            if !self.filters.query.is_empty() && clear_button(ui, resp.rect, "charts") {
                 self.filters.query.clear();
                 self.live_edited = Instant::now();
                 resp.request_focus();
@@ -1068,7 +1152,10 @@ impl App {
             });
             history.response.on_hover_text(t("Previous searches"));
             if let Some(q) = again {
-                self.filters.query = q;
+                // A past search starts fresh: just its text, with every other filter cleared
+                // (the sort order stays).
+                let f = &mut self.filters;
+                *f = Filters { query: q, sort: f.sort, descending: f.descending, ..Filters::default() };
                 self.live_edited = Instant::now();
             }
 
@@ -1082,11 +1169,11 @@ impl App {
                     ui.selectable_value(&mut self.filters.instrument, Some(k as u8), label);
                 }
             });
-            let diff_text = self.filters.difficulty.map_or(t("Any Difficulty"), |d| t(DIFFICULTIES[d as usize].1));
-            egui::ComboBox::from_id_salt("difficulty").selected_text(diff_text).width(120.0).show_ui(ui, |ui| {
-                ui.selectable_value(&mut self.filters.difficulty, None, t("Any Difficulty"));
-                for (k, (_, name)) in DIFFICULTIES.iter().enumerate() {
-                    ui.selectable_value(&mut self.filters.difficulty, Some(k as u8), t(name));
+            let diff_text = difficulty_label(self.filters.difficulty);
+            egui::ComboBox::from_id_salt("difficulty").selected_text(diff_text).width(130.0).show_ui(ui, |ui| {
+                ui.selectable_value(&mut self.filters.difficulty, None, difficulty_label(None));
+                for k in 0..DIFFICULTIES.len() as u8 {
+                    ui.selectable_value(&mut self.filters.difficulty, Some(k), difficulty_label(Some(k)));
                 }
             });
             if self.filters.instrument == Some(DRUMS) {
@@ -1113,7 +1200,7 @@ impl App {
         });
 
         ui.add_space(4.0);
-        ui.horizontal(|ui| {
+        crate::theme::hrow(ui, |ui| {
             let f = &mut self.filters;
             let all = !f.no_video && !f.no_broken && !f.legacy && f.game.is_none() && f.advanced_count() == 0;
             if pill(ui, all, &t("🌈  All songs")).on_hover_text(t("Clear all filters")).clicked() {
@@ -1149,14 +1236,142 @@ impl App {
                 }
             });
         });
-        // Clone Hero players whose names match the search, or the artist or charter being
-        // filtered by (players are often charters too).
-        let mut query = self.filters.query.trim().to_owned();
-        if query.is_empty() {
-            query = [1, 5].iter().map(|&k| self.filters.text[k].value.trim()).find(|v| !v.is_empty()).unwrap_or_default().to_owned();
-        }
-        self.players.search_strip(ui, &query);
+        self.user_searches(ui);
         self.remember_search();
+    }
+
+    /// `user:name` searches: looks the players up and lists which charts they've played for the
+    /// filter. Says how each lookup is going; returns whether there were any.
+    fn user_searches(&mut self, ui: &mut egui::Ui) -> bool {
+        let (terms, _) = query::parse(&self.filters.query);
+        let names: Vec<String> = terms
+            .iter()
+            .filter_map(|t| if let query::Cond::User(n) = &t.cond { Some(n.to_lowercase()) } else { None })
+            .collect();
+        self.filters.played.retain(|k, _| names.contains(k));
+        if names.is_empty() {
+            return false;
+        }
+        crate::theme::hrow_wrapped(ui, |ui| {
+            for name in &names {
+                match self.players.played(ui.ctx(), name) {
+                    None => {
+                        ui.spinner();
+                        ui.weak(tr!("Looking up {name}…", name = name));
+                    }
+                    Some(Err(e)) => {
+                        ui.colored_label(theme::bad(), tr!("Couldn't look up {name}: {error}", name = name, error = e));
+                    }
+                    Some(Ok(None)) => {
+                        self.filters.played.entry(name.clone()).or_default();
+                        ui.colored_label(theme::warn(), tr!("No Clone Hero player called {name}", name = name));
+                    }
+                    Some(Ok(Some((shown, charts)))) => {
+                        if !self.filters.played.contains_key(name) {
+                            self.filters.played.insert(name.clone(), charts.clone());
+                        }
+                        ui.label(RichText::new(format!("👤 {shown}")).strong());
+                        ui.weak(t("Charts from their latest scores and most played songs (the leaderboards don't share their full history)"));
+                    }
+                }
+            }
+        });
+        true
+    }
+
+    /// Moves a column to where its header was dropped (at pointer `x`), and remembers the order.
+    fn move_column(&mut self, col: Col, x: f32, headers: &[(Col, egui::Rect)]) {
+        // Shown columns in their on-screen order, left to right.
+        let mut shown: Vec<(Col, egui::Rect)> = headers.iter().filter(|h| !matches!(h.0, Col::Check)).copied().collect();
+        shown.sort_by(|a, b| a.1.left().total_cmp(&b.1.left()));
+        let Some(from) = shown.iter().position(|h| h.0 == col) else { return };
+        // The insertion point: before the first header whose middle is right of the pointer.
+        let mut to = shown.iter().position(|h| h.1.center().x > x).unwrap_or(shown.len());
+        if to > from {
+            to -= 1;
+        }
+        let moved = shown.remove(from).0;
+        shown.insert(to.min(shown.len()), (moved, egui::Rect::NOTHING));
+        let mut order: Vec<Col> = shown.into_iter().map(|h| h.0).collect();
+        if i18n::rtl() {
+            order.reverse(); // the table is mirrored
+        }
+        // Hidden columns keep their place after the shown ones.
+        let mut names: Vec<String> = order.iter().map(|c| format!("{c:?}")).collect();
+        for c in [Col::Name, Col::Artist, Col::Album, Col::Genre, Col::Year, Col::Charter, Col::Length, Col::Difficulty, Col::Uploaded, Col::Tags] {
+            let name = format!("{c:?}");
+            if !names.contains(&name) {
+                names.push(name);
+            }
+        }
+        self.settings.column_order = names;
+    }
+
+    /// Where the app is, for Back and Forward: the tab, the search, and the player profile.
+    fn place(&self) -> Place {
+        Place { tab: self.tab, filters: nav_key(&self.filters), profile: self.players.current_profile() }
+    }
+
+    /// Records where the app is for Back and Forward: a new tab or profile straight away, a new
+    /// search once it's been left alone briefly (so typing a word is one step, not one per
+    /// letter). Also handles the mouse's back/forward buttons and Alt+arrows.
+    fn track_history(&mut self, ctx: &egui::Context) {
+        let now = self.place();
+        if now == self.nav_current {
+            self.nav_changed = None;
+        } else {
+            let moved = now.tab != self.nav_current.tab || now.profile != self.nav_current.profile;
+            let since = *self.nav_changed.get_or_insert_with(Instant::now);
+            if moved || since.elapsed() >= Duration::from_millis(800) {
+                self.nav_back.push(std::mem::replace(&mut self.nav_current, now));
+                if self.nav_back.len() > 100 {
+                    self.nav_back.remove(0);
+                }
+                self.nav_forward.clear();
+                self.nav_changed = None;
+            } else {
+                ctx.request_repaint_after(Duration::from_millis(850));
+            }
+        }
+        let (back, forward) = ctx.input(|i| {
+            (
+                i.pointer.button_clicked(egui::PointerButton::Extra1) || i.modifiers.alt && i.key_pressed(egui::Key::ArrowLeft),
+                i.pointer.button_clicked(egui::PointerButton::Extra2) || i.modifiers.alt && i.key_pressed(egui::Key::ArrowRight),
+            )
+        });
+        if back {
+            self.go_back(ctx);
+        } else if forward {
+            self.go_forward(ctx);
+        }
+    }
+
+    fn go_back(&mut self, ctx: &egui::Context) {
+        let now = self.place();
+        if now != self.nav_current {
+            // Unsettled changes (still typing): back to the last settled place.
+            self.nav_forward.push(now);
+            self.restore(ctx, self.nav_current.clone());
+        } else if let Some(prev) = self.nav_back.pop() {
+            self.nav_forward.push(std::mem::replace(&mut self.nav_current, prev.clone()));
+            self.restore(ctx, prev);
+        }
+    }
+
+    fn go_forward(&mut self, ctx: &egui::Context) {
+        let Some(next) = self.nav_forward.pop() else { return };
+        self.nav_back.push(std::mem::replace(&mut self.nav_current, next.clone()));
+        self.restore(ctx, next);
+    }
+
+    /// Goes back to a place from the history (lookups already made, like `user:` players, are kept).
+    fn restore(&mut self, ctx: &egui::Context, place: Place) {
+        let (played, popular) = (std::mem::take(&mut self.filters.played), std::mem::take(&mut self.filters.popular));
+        self.filters = Filters { played, popular, ..place.filters };
+        self.tab = place.tab;
+        self.players.return_to(ctx, place.profile);
+        self.nav_changed = None;
+        self.live_edited = Instant::now();
     }
 
     /// Adds the search text to the history once it's been left alone for a few seconds.
@@ -1202,10 +1417,10 @@ impl App {
                     .inner_margin(egui::Margin::symmetric(16, 12));
                 frame.show(ui, |ui| {
                     ui.set_width(width - 32.0);
-                    ui.horizontal(|ui| {
+                    crate::theme::hrow(ui, |ui| {
                         ui.label(RichText::new(t("🎛  Advanced search")).size(17.0).strong().color(theme::accent_hover()));
                         ui.weak(tr!("{count} results", count = self.results.len()));
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.with_layout(crate::theme::trailing(), |ui| {
                             if ui.button(t("✖  Close")).on_hover_text(t("Esc")).clicked() {
                                 self.show_advanced = false;
                             }
@@ -1280,7 +1495,7 @@ impl App {
             .inner_margin(egui::Margin::same(12))
             .show(ui, |ui| {
                 ui.set_width(inner);
-                let natural = ui.vertical(|ui| {
+                let natural = crate::theme::vcol(ui, |ui| {
                     ui.label(RichText::new(t(title)).strong().color(theme::accent_hover()));
                     ui.add_space(6.0);
                     match section {
@@ -1302,23 +1517,25 @@ impl App {
                         }
                         Section::Ranges => {
                             let label_w = inner - 2.0 * 64.0 - 16.0;
-                            egui::Grid::new("adv_ranges").num_columns(3).spacing([8.0, 5.0]).min_col_width(0.0).show(ui, |ui| {
-                                for (label, range, tip) in [
-                                    (n("⏱  Length (min)"), &mut f.length_min, ""),
-                                    (n("🔥  Intensity"), &mut f.intensity, n("Also known as chart difficulty. Typically a number between 0 and 6.")),
-                                    (n("⚡  Average NPS"), &mut f.avg_nps, n("Average notes per second, for the chosen instrument/difficulty.")),
-                                    (n("🚀  Max NPS"), &mut f.max_nps, n("Highest notes per second, for the chosen instrument/difficulty.")),
-                                    (n("📅  Year"), &mut f.year, ""),
-                                ] {
-                                    range_row(ui, label, range, tip, label_w);
-                                }
-                            });
+                            let this_year = jiff::Zoned::now().year() as f64;
+                            // Each range: its boxes, then a slider underneath (the boxes win).
+                            for (label, range, tip, lo, hi, step) in [
+                                (n("⏱  Length (min)"), &mut f.length_min, "", 0.0, 20.0, 0.5),
+                                (n("🔥  Intensity"), &mut f.intensity, n("Also known as chart difficulty. Typically a number between 0 and 6."), 0.0, 6.0, 1.0),
+                                (n("⚡  Average NPS"), &mut f.avg_nps, n("Average notes per second, for the chosen instrument/difficulty."), 0.0, 20.0, 0.5),
+                                (n("🚀  Max NPS"), &mut f.max_nps, n("Highest notes per second, for the chosen instrument/difficulty."), 0.0, 40.0, 1.0),
+                                (n("📅  Year"), &mut f.year, "", 1960.0, this_year, 1.0),
+                            ] {
+                                crate::theme::hrow(ui, |ui| range_row(ui, label, range, tip, label_w));
+                                range_slider(ui, label, range, lo, hi, step);
+                                ui.add_space(4.0);
+                            }
                         }
                         Section::Chart => {
                             let field_w = inner - 110.0;
                             egui::Grid::new("adv_misc").num_columns(2).spacing([8.0, 5.0]).show(ui, |ui| {
                                 ui.label(t("Modified after")).on_hover_text(t("The date of the last time this chart was modified in Google Drive."));
-                                ui.horizontal(|ui| {
+                                crate::theme::hrow(ui, |ui| {
                                     // Type a date, or pick one from the calendar popup.
                                     let clear_w = if f.modified_after.is_empty() { 0.0 } else { 30.0 };
                                     let text_w = (field_w - 48.0 - clear_w).max(80.0);
@@ -1356,7 +1573,7 @@ impl App {
                                 }
                             });
                             if track_lookup {
-                                ui.horizontal(|ui| {
+                                crate::theme::hrow(ui, |ui| {
                                     ui.spinner();
                                     ui.small(t("Looking up track hash…"));
                                 });
@@ -1367,7 +1584,7 @@ impl App {
                         Section::Features => {
                             ui.small(t("Click to cycle: any → must have → must not have"));
                             ui.add_space(4.0);
-                            ui.horizontal_wrapped(|ui| {
+                            crate::theme::hrow_wrapped(ui, |ui| {
                                 ui.spacing_mut().item_spacing = vec2(6.0, 6.0);
                                 for (k, (label, _, applies)) in TOGGLES.iter().enumerate() {
                                     let state = &mut f.toggles[k];
@@ -1404,18 +1621,27 @@ impl App {
     /// The fixed status bar at the bottom: catalogue progress, rate-limit notices, the log
     /// and links to Encore.
     fn status_bar(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
+        // Drawn as fully as fits (like the results toolbar): links lose their names, then the
+        // less important bits go.
+        let full_width = ui.available_width();
+        self.status_level = pick_level(&self.status_widths, full_width - 8.0).min(3);
+        let level = self.status_level;
+        crate::theme::hrow(ui, |ui| {
             // The links on the right go first, so the catalogue progress and status message get
             // only the space that's left and shorten instead of running underneath them.
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.label(RichText::new(concat!("v", env!("CARGO_PKG_VERSION"))).monospace().weak())
-                    .on_hover_text(t("Rainbow version"));
+            ui.with_layout(crate::theme::trailing(), |ui| {
+                let start = ui.cursor();
+                if level < 2 {
+                    ui.label(RichText::new(concat!("v", env!("CARGO_PKG_VERSION"))).monospace().weak())
+                        .on_hover_text(t("Rainbow version"));
+                }
                 self.updates.status_bar(ui);
                 ui.separator();
+                let named = level == 0;
                 web_link(
                     ui,
                     Some(egui::include_image!("../assets/icons/github.svg")),
-                    "GitHub",
+                    if named { "GitHub" } else { "" },
                     "https://github.com/renzora/rainbow",
                     n("Rainbow's source code, releases and issue tracker"),
                 );
@@ -1423,22 +1649,23 @@ impl App {
                 web_link(
                     ui,
                     Some(egui::include_image!("../assets/icons/discord.svg")),
-                    "Discord",
+                    if named { "Discord" } else { "" },
                     "https://discord.gg/x6KHzEe2j2",
                     n("Join the Renzora Discord: news, help and feedback for Rainbow"),
                 );
                 web_link(
                     ui,
                     Some(egui::include_image!("../assets/icons/patreon.svg")),
-                    "Patreon",
+                    if named { "Patreon" } else { "" },
                     "https://www.patreon.com/cw/ChorusEncore701?l=en-GB",
                     n("Support Chorus Encore: it's donation-funded and pays for the servers and file hosting Rainbow uses"),
                 );
-                web_link(ui, None, "🌐 Encore", "https://www.enchor.us", n("Chorus Encore, the chart search engine Rainbow is built on"));
+                web_link(ui, None, if named { "🌐 Encore" } else { "🌐" }, "https://www.enchor.us", n("Chorus Encore, the chart search engine Rainbow is built on"));
                 ui.separator();
                 self.language_picker(ui);
                 ui.separator();
-                if ui.button(t("🐞 Report an issue")).on_hover_text(t("Get help, or report a problem with Rainbow")).clicked() {
+                let report = if level == 0 { t("🐞 Report an issue") } else { "🐞".to_owned() };
+                if ui.button(report).on_hover_text(t("Get help, or report a problem with Rainbow")).clicked() {
                     self.show_report = true;
                 }
                 // Errors since the log was last looked at, as a red count beside its button.
@@ -1451,14 +1678,16 @@ impl App {
                     ui.label(RichText::new(format!("✖ {unseen}")).color(theme::bad()).strong())
                         .on_hover_text(tr!("{count} new error(s): open the log to see them", count = unseen));
                 }
+                let log = if level == 0 { tr!("📜 Log ({count})", count = self.log.len()) } else { "📜".to_owned() };
                 if ui
-                    .selectable_label(self.show_log, tr!("📜 Log ({count})", count = self.log.len()))
+                    .selectable_label(self.show_log, log)
                     .on_hover_text(t("Show activity and errors"))
                     .clicked()
                 {
                     self.show_log = !self.show_log;
                 }
-                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                let right = (start.right() - ui.cursor().right()).abs().max((ui.cursor().left() - start.left()).abs());
+                let left = ui.with_layout(if i18n::rtl() { egui::Layout::right_to_left(egui::Align::Center) } else { egui::Layout::left_to_right(egui::Align::Center) }, |ui| {
                     match &self.cat_status {
                         CatStatus::Building { page, pages, charts } => {
                             ui.spinner();
@@ -1467,7 +1696,7 @@ impl App {
                             } else {
                                 if *pages > 0 {
                                     ui.add(
-                                        egui::ProgressBar::new(*page as f32 / (*pages).max(1) as f32)
+                                        crate::theme::Bar::new(*page as f32 / (*pages).max(1) as f32)
                                             .desired_width(140.0)
                                             .text(format!("{page}/{pages}")),
                                     );
@@ -1486,8 +1715,11 @@ impl App {
                             }
                         }
                         CatStatus::Idle if self.cat_complete => {
-                            ui.label(tr!("📚 {count} charts", count = self.charts.len()));
-                            ui.weak(tr!("updated {when}", when = ago(self.cat_updated)));
+                            ui.label(tr!("📚 {count} charts", count = self.charts.len()))
+                                .on_hover_text(tr!("updated {when}", when = ago(self.cat_updated)));
+                            if level < 2 {
+                                ui.weak(tr!("updated {when}", when = ago(self.cat_updated)));
+                            }
                             if ui.small_button("⟳").on_hover_text(t("Check Encore for new charts")).clicked() {
                                 self.update_catalogue(false);
                             }
@@ -1499,6 +1731,8 @@ impl App {
                             }
                         }
                     }
+                    // What this side needs (a status message just shortens to fit).
+                    let needed = ui.min_rect().width();
                     if let Some((s, at)) = &self.status
                         && at.elapsed() < Duration::from_secs(60)
                     {
@@ -1506,35 +1740,66 @@ impl App {
                         let label = egui::Label::new(RichText::new(format!("⏳ {s}")).color(theme::warn())).truncate();
                         ui.add(label).on_hover_text(s);
                     }
+                    needed
                 });
+                self.status_widths[level] = right + left.inner + 16.0;
             });
         });
     }
 
-    /// The interface language picker in the status bar. Each language is shown in itself.
+    /// The interface language picker in the status bar: the current language's flag and name,
+    /// opening a menu of every language (each shown in itself, with its flag).
     fn language_picker(&mut self, ui: &mut egui::Ui) {
         let languages = &self.languages;
-        let current = if self.settings.language == "auto" {
-            tr!("🌐 Auto ({language})", language = languages.iter().find(|l| l.code == i18n::system_language()).map_or("English", |l| l.name.as_str()))
-        } else {
-            format!("🌐 {}", languages.iter().find(|l| l.code == self.settings.language).map_or("English", |l| l.name.as_str()))
+        let shown_code = if self.settings.language == "auto" { i18n::system_language() } else { self.settings.language.clone() };
+        let name = languages.iter().find(|l| l.code == shown_code).map_or("English", |l| l.name.as_str());
+        let current = if self.settings.language == "auto" { tr!("Auto ({language})", language = name) } else { name.to_owned() };
+        let flag_size = vec2(19.0, 14.0);
+        let flag = |ui: &egui::Ui, code: &str| flags::flag(ui.ctx(), code).map(|tex| egui::Image::new(&tex).fit_to_exact_size(flag_size).corner_radius(2));
+        // Just the flag when the status bar is short of room.
+        let label = if self.status_level >= 2 { "⏷".to_owned() } else { format!("{current}  ⏷") };
+        let button = match flag(ui, &shown_code) {
+            Some(img) => egui::Button::image_and_text(img, label),
+            None => egui::Button::new(format!("🌐 {label}")),
         };
         let mut picked = None;
-        egui::ComboBox::from_id_salt("language").selected_text(current).height(420.0).show_ui(ui, |ui| {
-            ui.set_min_width(220.0);
-            if ui.selectable_label(self.settings.language == "auto", t("Auto (system language)")).clicked() {
-                picked = Some("auto".to_owned());
-            }
-            ui.separator();
-            for lang in languages {
-                let label = if lang.name == lang.english_name { lang.name.clone() } else { format!("{}  ·  {}", lang.name, lang.english_name) };
-                if ui.selectable_label(self.settings.language == lang.code, label).clicked() {
-                    picked = Some(lang.code.clone());
+        let (resp, _) = egui::containers::menu::MenuButton::from_button(button).ui(ui, |ui| {
+            // A fixed size, with the same scroll bar as the song list.
+            const W: f32 = 270.0;
+            let height = (ui.ctx().content_rect().height() - 120.0).clamp(160.0, 420.0);
+            // Room between each flag and its name.
+            ui.spacing_mut().icon_spacing = 10.0;
+            ui.allocate_ui(vec2(W, height), |ui| {
+                ui.set_min_size(vec2(W, height));
+                crate::fancy_scroll(ui, "language_menu", |ui| {
+                let row_w = ui.available_width();
+                let auto = egui::Button::new(format!("🌐  {}", t("Auto (system language)")))
+                    .selected(self.settings.language == "auto")
+                    .frame_when_inactive(false)
+                    .min_size(vec2(row_w, 0.0));
+                if ui.add(auto).clicked() {
+                    picked = Some("auto".to_owned());
                 }
+                ui.separator();
+                for lang in languages {
+                    let label = if lang.name == lang.english_name { lang.name.clone() } else { format!("{}  ·  {}", lang.name, lang.english_name) };
+                    let on = self.settings.language == lang.code;
+                    let button = match flag(ui, &lang.code) {
+                        Some(img) => egui::Button::image_and_text(img, label),
+                        None => egui::Button::new(label),
+                    };
+                    let button = button.selected(on).frame_when_inactive(false).min_size(vec2(row_w, 0.0));
+                    if ui.add(button).clicked() {
+                        picked = Some(lang.code.clone());
+                    }
+                }
+                });
+            });
+            if picked.is_some() {
+                ui.close();
             }
-        })
-        .response
-        .on_hover_text(t("Language"));
+        });
+        resp.on_hover_text(t("Language"));
         if let Some(code) = picked {
             self.settings.language = code;
         }
@@ -1546,15 +1811,27 @@ impl App {
             return;
         };
         ui.add_space(4.0);
-        ui.horizontal(|ui| {
-            ui.strong(format!("⬇ {}", job.title));
+        crate::theme::hrow(ui, |ui| {
+            // Titles like "Entire Encore library" are translated (a resumed download keeps the
+            // title it started with).
+            ui.strong(format!("⬇ {}", t(&job.title)));
             ui.label(tr!("{done} / {total} checked", done = job.checked, total = job.total));
             ui.colored_label(theme::good(), tr!("✔ {count} downloaded", count = job.downloaded));
-            ui.weak(tr!("{count} already had", count = job.checked - job.downloaded - job.failed));
+            ui.weak(tr!("{count} in library", count = job.checked - job.downloaded - job.failed));
             if job.failed > 0 {
                 ui.colored_label(theme::bad(), tr!("✖ {count} failed", count = job.failed));
             }
-            if ui.small_button(t("⏹ Stop")).clicked() {
+            // Time left: the average time per chart fetched so far, times the charts still to get
+            // (ones already downloaded are skipped in no time).
+            let fetched = job.downloaded + job.failed;
+            let left = job.to_get.saturating_sub(fetched);
+            if fetched >= 2 && left > 0 {
+                let secs = job.started.elapsed().as_secs_f64() / fetched as f64 * left as f64;
+                ui.weak(tr!("⏳ about {time} left ({count} to go)", time = duration_words(secs), count = preview::thousands(left as u64)))
+                    .on_hover_text(t("Estimated from how long each download has taken so far"));
+            }
+            let stop = egui::Button::new(RichText::new(t("Stop")).color(Color32::WHITE).strong()).fill(theme::bad()).small();
+            if ui.add(stop).clicked() {
                 self.stop.store(true, Ordering::Relaxed);
             }
         });
@@ -1566,13 +1843,14 @@ impl App {
             Some((title, done, _)) => format!("{percent}   ·   {title}  ({:.1} MB)", *done as f64 / 1_048_576.0),
             None => percent,
         };
-        ui.add(egui::ProgressBar::new(frac).text(text).fill(theme::accent()));
+        ui.add(crate::theme::Bar::new(frac).text(text).fill(theme::accent()));
         ui.add_space(4.0);
     }
 
     /// The log slides up above the status bar; drag its top edge to resize it.
-    fn log_panel(&mut self, ui: &mut egui::Ui) {
+    fn log_panel(&mut self, ui: &mut egui::Ui, normal: &std::sync::Arc<egui::Style>) {
         let log = &self.log;
+        let mut close = false;
         egui::Panel::bottom("log")
             .resizable(true)
             .default_size(220.0)
@@ -1580,10 +1858,14 @@ impl App {
             .max_size(600.0)
             .drag_to_open(false)
             .show_collapsible(ui, &mut self.show_log, |ui| {
+                ui.set_style(normal.clone());
                 ui.add_space(6.0);
-                ui.horizontal(|ui| {
+                crate::theme::hrow(ui, |ui| {
                     ui.label(RichText::new(tr!("📜 Log ({count})", count = log.len())).strong());
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.with_layout(crate::theme::trailing(), |ui| {
+                        if ui.small_button(t("✖ Close")).on_hover_text(t("Hide the log")).clicked() {
+                            close = true;
+                        }
                         if ui.small_button(t("Copy all")).on_hover_text(t("Copy the whole log")).clicked() {
                             ui.ctx().copy_text(log.join("\n"));
                         }
@@ -1594,7 +1876,7 @@ impl App {
                     for line in log {
                         // An icon column for the kind of line; errors and warnings are coloured too.
                         let kind = log_level(line);
-                        ui.horizontal(|ui| {
+                        crate::theme::hrow(ui, |ui| {
                             let (rect, _) = ui.allocate_exact_size(vec2(22.0, 16.0), Sense::hover());
                             ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, kind.icon(), egui::FontId::proportional(13.0), kind.color(ui));
                             let text = RichText::new(line).monospace();
@@ -1605,6 +1887,9 @@ impl App {
                     }
                 });
             });
+        if close {
+            self.show_log = false;
+        }
     }
 
     /// The columns to show at this table width: the ones enabled in Settings, minus the least
@@ -1631,6 +1916,13 @@ impl App {
             }
         }
         cols.push(Col::Tags);
+        // The order set by dragging headers (the tick box and cover always come first).
+        let order = &self.settings.column_order;
+        if !order.is_empty() {
+            let rank = |c: &Col| order.iter().position(|o| *o == format!("{c:?}")).unwrap_or(usize::MAX);
+            let fixed = cols.iter().take_while(|c| matches!(c, Col::Check | Col::Cover)).count();
+            cols[fixed..].sort_by_key(rank);
+        }
 
         let width = |cols: &[Col]| cols.iter().map(|&col| self.column_width(col) + 8.0).sum::<f32>();
         for drop in [Col::Uploaded, Col::Year, Col::Genre, Col::Tags, Col::Length, Col::Album, Col::Charter, Col::Difficulty] {
@@ -1638,6 +1930,10 @@ impl App {
                 break;
             }
             cols.retain(|&c| c != drop);
+        }
+        // Right to left: the tick boxes and names start on the right.
+        if i18n::rtl() {
+            cols.reverse();
         }
         cols
     }
@@ -1762,7 +2058,7 @@ impl App {
             return;
         }
         ui.add_space(4.0);
-        ui.horizontal_wrapped(|ui| {
+        crate::theme::hrow_wrapped(ui, |ui| {
             if !self.history.is_empty() && ui.button(t("← Back")).on_hover_text(t("Go back to the previous search")).clicked() {
                 self.filters = self.history.pop().unwrap_or_default();
                 return;
@@ -1784,9 +2080,10 @@ impl App {
     }
 
     fn toolbar_left(&mut self, ui: &mut egui::Ui) {
+        let level = self.toolbar_level;
         let count = self.results.len();
         ui.label(RichText::new(tr!("{count} results", count = count)).strong());
-        if !self.cat_complete {
+        if !self.cat_complete && level == 0 {
             if self.live_searching {
                 ui.spinner();
             }
@@ -1795,6 +2092,37 @@ impl App {
                 None => tr!("(searching {count} charts so far)", count = self.charts.len()),
             };
             ui.weak(searching);
+        }
+        ui.separator();
+        // The order, including ones no column sorts by.
+        let f = &mut self.filters;
+        let current = SORTS.iter().find(|s| s.0 == f.sort).map_or_else(|| t("Custom order"), |s| t(s.1));
+        // Narrower as space runs out: the full name, a shorter box, then just the icon.
+        let (shown, width) = match level {
+            0 => (format!("⇅  {current}"), 190.0),
+            1 => (format!("⇅  {current}"), 140.0),
+            _ => ("⇅".to_owned(), 30.0),
+        };
+        egui::ComboBox::from_id_salt("list_order")
+            .selected_text(shown)
+            .width(width)
+            .show_ui(ui, |ui| {
+                ui.set_min_width(190.0);
+                for (key, name) in SORTS {
+                    if ui.selectable_label(f.sort == key, t(name)).clicked() {
+                        (f.sort, f.descending) = (key, false);
+                    }
+                }
+            })
+            .response
+            .on_hover_text(current);
+        if f.sort == SortKey::Popular && f.popular.is_empty() {
+            match self.players.popular_songs(ui.ctx()) {
+                Some(songs) => f.popular = songs,
+                None => {
+                    ui.spinner();
+                }
+            }
         }
         ui.separator();
         for (d, icon, tip) in [
@@ -1817,21 +2145,34 @@ impl App {
     fn toolbar_right(&mut self, ui: &mut egui::Ui) {
         let busy = self.job.is_some();
         let count = self.results.len();
+        let level = self.toolbar_level;
+        // Shorter labels as space runs out (the tooltips always say it in full).
+        let library = if level < 2 { t("⬇ Entire library") } else { "⬇ 📚".to_owned() };
         let resp = ui
-            .add_enabled(!busy && self.cat_complete, egui::Button::new(t("⬇ Entire library")))
+            .add_enabled(!busy && self.cat_complete, egui::Button::new(library))
             .on_hover_text(t("Download every chart on Encore"))
             .on_disabled_hover_text(t("Available once the catalogue has finished downloading"));
         if resp.clicked() {
             let charts = self.charts.clone();
             self.request_download(t("Entire Encore library"), charts);
         }
-        let resp = ui.add_enabled(!busy && count > 0, egui::Button::new(tr!("⬇ All {count} results", count = count)));
+        let all = match level {
+            0 => tr!("⬇ All {count} results", count = count),
+            1 => t("⬇ All results"),
+            _ => t("⬇ All"),
+        };
+        let resp = ui.add_enabled(!busy && count > 0, egui::Button::new(all)).on_hover_text(tr!("⬇ All {count} results", count = count));
         if resp.clicked() {
             let charts: Vec<Chart> = self.results.iter().map(|&i| self.charts[i].clone()).collect();
             self.request_download(t("All current results"), charts);
         }
         let n = self.selected.len();
-        if ui.add_enabled(!busy && n > 0, theme::download_button(tr!("⬇ Download selected ({count})", count = n))).clicked() {
+        let selected = if level == 0 { tr!("⬇ Download selected ({count})", count = n) } else { tr!("⬇ Selected ({count})", count = n) };
+        if ui
+            .add_enabled(!busy && n > 0, theme::download_button(selected))
+            .on_hover_text(tr!("⬇ Download selected ({count})", count = n))
+            .clicked()
+        {
             let charts = self.selected_charts();
             self.selected.clear();
             self.request_download(tr!("{count} selected chart(s)", count = charts.len()), charts);
@@ -1842,39 +2183,42 @@ impl App {
         let count = self.results.len();
         // The visible results area, for centring the floating "Back to top" button.
         let visible = ui.clip_rect().intersect(ui.max_rect());
-        // One row if both halves fit (measured last frame, so it adapts to font and zoom),
-        // otherwise the download buttons move to a second row.
+        // One row, drawn as fully as fits: each level of compactness has its width remembered
+        // from when it was last drawn, and the fullest one that fits is used. Only if even the
+        // most compact one doesn't fit do the download buttons move to a second row.
         let width = ui.available_width();
-        let (left_w, right_w) = self.toolbar_w;
-        if width >= left_w + right_w + 24.0 {
-            ui.horizontal(|ui| {
+        self.toolbar_level = pick_level(&self.toolbar_widths, width - 24.0);
+        if self.toolbar_level < 3 {
+            crate::theme::hrow(ui, |ui| {
                 let left = ui.scope(|ui| self.toolbar_left(ui)).response.rect.width();
                 let right = ui
-                    .with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        self.toolbar_right(ui)
+                    .with_layout(crate::theme::trailing(), |ui| {
+                        let start = ui.cursor();
+                        self.toolbar_right(ui);
+                        (start.right() - ui.cursor().right()).abs().max((ui.cursor().left() - start.left()).abs())
                     })
-                    .response
-                    .rect
-                    .width();
-                self.toolbar_w = (left, right.min(width));
+                    .inner;
+                self.toolbar_widths[self.toolbar_level] = left + right;
             });
         } else {
-            ui.horizontal(|ui| self.toolbar_left(ui));
+            crate::theme::hrow(ui, |ui| self.toolbar_left(ui));
             ui.add_space(2.0);
-            ui.horizontal(|ui| {
-                let right = ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            crate::theme::hrow(ui, |ui| {
+                let right = ui.with_layout(crate::theme::trailing(), |ui| {
                     let start = ui.cursor().right();
                     self.toolbar_right(ui);
                     start - ui.min_rect().left()
                 });
-                self.toolbar_w.1 = right.inner;
+                let _ = right;
             });
         }
         ui.add_space(4.0);
 
         // The table, with a strip on the right for the custom scroll bar.
         let full = ui.available_rect_before_wrap();
-        let table_rect = full.with_max_x(full.right() - theme::SCROLLBAR_W - 6.0);
+        // The scroll bar on the right, or the left in a right-to-left language.
+        let rtl = i18n::rtl();
+        let table_rect = if rtl { full.with_min_x(full.left() + theme::SCROLLBAR_W + 6.0) } else { full.with_max_x(full.right() - theme::SCROLLBAR_W - 6.0) };
         let mut table_ui = ui.new_child(egui::UiBuilder::new().max_rect(table_rect));
         // Keep rows from spilling under the scroll bar.
         table_ui.set_clip_rect(table_rect.intersect(ui.clip_rect()));
@@ -1896,13 +2240,19 @@ impl App {
         let mut nav: Option<Nav> = None;
         let mut row_menu: Option<RowAction> = None;
         let mut sort_click = None;
+        let mut first_row = usize::MAX;
+        // The cover column's own resize handle: how far it was dragged, and whether it still is.
+        let (mut cover_delta, mut cover_active) = (0.0f32, false);
+        // Dragging a header moves its column: each movable header's rect, and the one dropped.
+        let mut header_rects: Vec<(Col, egui::Rect)> = Vec::new();
+        let mut dropped: Option<(Col, f32)> = None;
+        let drag_id = egui::Id::new("column_drag");
         let mut toggle_all = false;
         let any_selected = !self.selected.is_empty();
         let all_selected = count > 0 && self.results.iter().all(|&i| self.selected.contains(&self.charts[i].md5));
         let show_cover = self.settings.columns.cover;
         let cover_px = self.settings.cover_size;
         let row_h = if show_cover { cover_px + 8.0 } else { self.settings.density.row_height() };
-        let mut cover_width = None;
 
         // Split borrows: the table body reads results while loading covers mutably.
         let (charts, results) = (&self.charts, &self.results);
@@ -1932,6 +2282,8 @@ impl App {
             .cell_layout(egui::Layout::left_to_right(egui::Align::Center));
         if let Some(row) = self.scroll_to.take() {
             table = table.scroll_to_row(row, None);
+        } else if self.cover_dragging {
+            table = table.scroll_to_row(self.first_row, Some(egui::Align::Min));
         }
         if std::mem::take(&mut self.scroll_to_top) {
             table = table.scroll_to_row(0, None);
@@ -1944,9 +2296,10 @@ impl App {
         let last = cols.len() - 1;
         for (k, (&col, &w)) in cols.iter().zip(&widths).enumerate() {
             table = table.column(match col {
-                Col::Check => Column::exact(w),
+                Col::Check => Column::exact(w).resizable(false),
                 _ if k == last => Column::remainder().at_least(w.min(120.0)).clip(true),
-                Col::Cover => Column::initial(w).range(32.0..=250.0),
+                // Sized by its own handle (in the header), not the table's.
+                Col::Cover => Column::exact(w).resizable(false),
                 Col::Name => Column::initial(name_w).at_least(140.0).clip(true),
                 _ => Column::initial(w).at_least(40.0).clip(true),
             });
@@ -1959,7 +2312,7 @@ impl App {
                             ui.add_space(9.0);
                             let mut all = all_selected;
                             let tip = if all_selected { t("Deselect all results") } else { t("Select all results") };
-                            if theme::checkbox_ex(ui, &mut all, "", any_selected && !all_selected).on_hover_text(tip).clicked() {
+                            if theme::select_box(ui, &mut all, any_selected && !all_selected).on_hover_text(tip).clicked() {
                                 toggle_all = true;
                             }
                         });
@@ -1979,6 +2332,46 @@ impl App {
                         Col::Uploaded => (n("Uploaded"), Some(SortKey::Uploaded)),
                     };
                     h.col(|ui| {
+                        // The whole header can be dragged (clicking the name still sorts).
+                        let cell = ui.max_rect();
+                        if matches!(col, Col::Cover) {
+                            // Dragging the cover column's edge sizes the covers (and rows).
+                            // Its inner edge: the right, or the left when the table is mirrored.
+                            let x = if i18n::rtl() { cell.left() } else { cell.right() };
+                            let edge = egui::Rect::from_center_size(egui::pos2(x, cell.center().y), vec2(12.0, cell.height()));
+                            let handle = ui.interact(edge, egui::Id::new("cover_resize"), Sense::drag());
+                            handle.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Slider, true, t("Cover size")));
+                            let hot = handle.hovered() || handle.dragged();
+                            if hot {
+                                ui.ctx().set_cursor_icon(CursorIcon::ResizeHorizontal);
+                            }
+                            let w = ui.visuals().widgets.clone();
+                            let stroke = if hot { egui::Stroke::new(4.0, w.hovered.bg_stroke.color) } else { egui::Stroke::new(3.0, w.noninteractive.bg_stroke.color) };
+                            ui.painter().with_clip_rect(ui.ctx().content_rect()).line_segment([egui::pos2(x, cell.top()), egui::pos2(x, cell.bottom())], stroke);
+                            if handle.dragged() {
+                                cover_delta += handle.drag_delta().x;
+                                cover_active = true;
+                            }
+                        }
+                        if !matches!(col, Col::Cover) {
+                            header_rects.push((*col, cell));
+                            // Kept off the edges, which resize the column.
+                            let grab = ui.interact(cell.shrink2(vec2(8.0, 0.0)), egui::Id::new(("column_header", *col as u8)), Sense::drag());
+                            if grab.drag_started() {
+                                ui.ctx().data_mut(|d| d.insert_temp(drag_id, *col as u8));
+                            }
+                            if grab.dragged() {
+                                ui.ctx().set_cursor_icon(CursorIcon::Grabbing);
+                                ui.painter().rect_filled(cell, CornerRadius::same(4), theme::accent().linear_multiply(0.25));
+                            } else if grab.hovered() {
+                                ui.ctx().set_cursor_icon(CursorIcon::Grab);
+                            }
+                            if grab.drag_stopped()
+                                && let Some(pos) = grab.interact_pointer_pos()
+                            {
+                                dropped = Some((*col, pos.x));
+                            }
+                        }
                         ui.add_space(8.0);
                         let Some(key) = key else {
                             ui.strong(t(title));
@@ -1999,6 +2392,7 @@ impl App {
             .body(|body| {
                 body.rows(row_h, count, |mut row| {
                     let i = row.index();
+                    first_row = first_row.min(i);
                     let c = &charts[results[i]];
                     let is_checked = selected.contains(&c.md5);
                     row.set_selected(is_checked || detail_md5.as_deref() == Some(c.md5.as_str()));
@@ -2010,13 +2404,27 @@ impl App {
                             match col {
                             Col::Check => {
                                 let mut checked = is_checked;
-                                if theme::checkbox(ui, &mut checked, "").changed() {
+                                if theme::select_box(ui, &mut checked, false).changed() {
                                     click = Some(RowClick::Checkbox(i));
                                 }
                             }
                             Col::Cover => {
-                                cover_width.get_or_insert(ui.max_rect().width());
-                                cover(ui, covers, c.art.as_deref(), cover_px, covers::THUMB);
+                                let rect = cover(ui, covers, c.art.as_deref(), cover_px, covers::THUMB);
+                                // Hovering the cover shows a play button that opens the preview.
+                                let play = ui.interact(rect, ui.id().with(("cover_play", i)), Sense::click());
+                                play.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, t("Preview")));
+                                if play.hovered() {
+                                    let p = ui.painter();
+                                    p.rect_filled(rect, CornerRadius::same(5), Color32::from_black_alpha(110));
+                                    let r = (rect.width() * 0.28).clamp(7.0, 22.0);
+                                    p.circle_filled(rect.center(), r, Color32::from_rgb(124, 84, 210));
+                                    let c0 = rect.center() + vec2(r * 0.12, 0.0);
+                                    let tri = vec![c0 + vec2(-r * 0.4, -r * 0.5), c0 + vec2(r * 0.55, 0.0), c0 + vec2(-r * 0.4, r * 0.5)];
+                                    p.add(egui::Shape::convex_polygon(tri, Color32::WHITE, egui::Stroke::NONE));
+                                }
+                                if play.on_hover_cursor(CursorIcon::PointingHand).on_hover_text(t("Preview")).clicked() {
+                                    row_menu = Some(RowAction::Preview(i));
+                                }
                             }
                             Col::Name => {
                                 ui.label(RichText::new(text(&c.name)).strong().size(name_size));
@@ -2089,12 +2497,14 @@ impl App {
             });
         drop(manifest);
 
-        let bar = egui::Rect::from_min_max(
-            egui::pos2(full.right() - theme::SCROLLBAR_W, scroll.inner_rect.top()),
-            egui::pos2(full.right(), scroll.inner_rect.bottom()),
-        );
+        let bar_x = if rtl { full.left() } else { full.right() - theme::SCROLLBAR_W };
+        let bar = egui::Rect::from_min_max(egui::pos2(bar_x, scroll.inner_rect.top()), egui::pos2(bar_x + theme::SCROLLBAR_W, scroll.inner_rect.bottom()));
         // A solid strip behind the scroll bar, from the table's edge to the panel's.
-        let strip = egui::Rect::from_min_max(egui::pos2(table_rect.right(), bar.top()), egui::pos2(full.right(), bar.bottom()));
+        let strip = if rtl {
+            egui::Rect::from_min_max(egui::pos2(full.left(), bar.top()), egui::pos2(table_rect.left(), bar.bottom()))
+        } else {
+            egui::Rect::from_min_max(egui::pos2(table_rect.right(), bar.top()), egui::pos2(full.right(), bar.bottom()))
+        };
         ui.painter().rect_filled(strip, CornerRadius::ZERO, ui.visuals().panel_fill);
         let view = scroll.inner_rect.height();
         if let Some(offset) = theme::scrollbar(ui, bar, scroll.id.with("bar"), scroll.state.offset.y, scroll.content_size.y, view) {
@@ -2113,7 +2523,8 @@ impl App {
                 visible.bottom().min(scroll.inner_rect.bottom()) - 18.0,
             );
             egui::Area::new(egui::Id::new("scroll_top"))
-                .order(egui::Order::Foreground)
+                // Above the table, but under menus and pop-ups (which are Foreground).
+                .order(egui::Order::Middle)
                 .pivot(egui::Align2::CENTER_BOTTOM)
                 .fixed_pos(pos)
                 .show(ui.ctx(), |ui| {
@@ -2123,12 +2534,15 @@ impl App {
                 });
         }
 
-        // The cover column was resized: scale the covers (and rows) to match.
-        if let Some(w) = cover_width {
-            let size = (w - 16.0).clamp(16.0, 234.0);
-            if (size - self.settings.cover_size).abs() > 0.5 {
-                self.settings.cover_size = size;
-            }
+        // The cover column's handle was dragged: resize the covers, keeping the top row in place
+        // (see `first_row`) so the table doesn't jump as the rows change height.
+        if first_row != usize::MAX {
+            self.first_row = first_row;
+        }
+        self.cover_dragging = cover_active;
+        if cover_delta != 0.0 {
+            let dir = if i18n::rtl() { -1.0 } else { 1.0 };
+            self.settings.cover_size = (self.settings.cover_size + cover_delta * dir).clamp(16.0, 234.0);
         }
         if let Some(click) = click {
             self.handle_click(click);
@@ -2165,6 +2579,23 @@ impl App {
                 self.selected.extend(self.results.iter().map(|&i| self.charts[i].md5.clone()));
             }
         }
+        // While dragging a header, a line shows where its column will go.
+        let dragging = ui.ctx().data(|d| d.get_temp::<u8>(drag_id));
+        if let (Some(_), Some(pos)) = (dragging, ui.ctx().pointer_interact_pos())
+            && ui.ctx().input(|i| i.pointer.primary_down())
+            && let Some(x) = column_gap(&header_rects, pos.x)
+            && let (Some(first), Some(last)) = (header_rects.first(), header_rects.last())
+        {
+            let (top, bottom) = (first.1.top(), last.1.bottom());
+            ui.ctx().layer_painter(egui::LayerId::new(egui::Order::Foreground, drag_id)).line_segment(
+                [egui::pos2(x, top), egui::pos2(x, bottom + 6.0)],
+                egui::Stroke::new(3.0, theme::accent_hover()),
+            );
+        }
+        if let Some((col, x)) = dropped {
+            ui.ctx().data_mut(|d| d.remove::<u8>(drag_id));
+            self.move_column(col, x, &header_rects);
+        }
         if let Some(key) = sort_click {
             let f = &mut self.filters;
             if f.sort == key {
@@ -2185,6 +2616,30 @@ impl App {
     /// File-manager style selection: click selects one row (and shows its details),
     /// Ctrl/Cmd+click toggles a row, Shift+click selects a range (adding to the selection
     /// if Ctrl/Cmd is also held), and the checkbox toggles without touching other rows.
+    /// Shows the chart from a link once it's in the catalogue: just it in the list, with its
+    /// details open. A full MD5 Rainbow doesn't have yet is looked up on Encore.
+    fn open_pending_link(&mut self) {
+        let Some(id) = self.pending_link.clone() else { return };
+        let found: Vec<Chart> = self.charts.iter().filter(|c| c.md5.starts_with(&id)).take(2).cloned().collect();
+        if let Some(c) = found.first().cloned() {
+            if found.len() > 1 {
+                self.log(format!("More than one chart starts with {id}; showing the first"));
+            }
+            self.filters = Filters { query: c.md5.clone(), sort: self.filters.sort, descending: self.filters.descending, ..Filters::default() };
+            self.live_edited = Instant::now();
+            self.selected = HashSet::from([c.md5.clone()]);
+            self.detail = Some(c);
+            self.pending_link = None;
+        } else if id.len() == 32 && self.filters.query != id {
+            // Search for it, which asks Encore if the catalogue doesn't have it.
+            self.filters = Filters { query: id, sort: self.filters.sort, descending: self.filters.descending, ..Filters::default() };
+            self.live_edited = Instant::now();
+        } else if self.cat_complete && id.len() < 32 {
+            self.log(format!("FAILED to open shared chart {id}: no chart on Encore starts with it"));
+            self.pending_link = None;
+        }
+    }
+
     fn handle_click(&mut self, click: RowClick) {
         let md5 = |app: &Self, i: usize| app.charts[app.results[i]].md5.clone();
         match click {
@@ -2220,11 +2675,12 @@ impl App {
         let downloaded = self.manifest.lock().unwrap().contains(&c.md5);
         fancy_scroll(ui, "detail", |ui| {
             ui.add_space(8.0);
-            ui.horizontal(|ui| {
+            crate::theme::hrow(ui, |ui| {
                 ui.weak(t("MD5"));
                 // The copy button sits at the right edge; the hash takes what's left and
                 // shortens with "…" if needed (right-click or hover shows it in full).
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.with_layout(crate::theme::trailing(), |ui| {
+                    ui.menu_button("🔗", |ui| copy_link_items(ui, &c.md5)).response.on_hover_text(t("Copy a link to this chart that opens it in Rainbow"));
                     if ui.small_button("📋").on_hover_text(t("Copy MD5")).clicked() {
                         ui.ctx().copy_text(c.md5.clone());
                     }
@@ -2253,7 +2709,7 @@ impl App {
             {
                 nav = Some(Nav::Text(1, a.clone(), true));
             }
-            ui.horizontal_wrapped(|ui| {
+            crate::theme::hrow_wrapped(ui, |ui| {
                 ui.spacing_mut().item_spacing.x = 4.0;
                 if let Some(a) = &c.album
                     && link(ui, RichText::new(a).weak(), n("Show this album"))
@@ -2270,36 +2726,61 @@ impl App {
                 }
             });
             ui.add_space(6.0);
-            ui.horizontal_wrapped(|ui| {
-                if let Some(g) = games::game_key(c.icon.as_deref())
-                    && theme::chip(ui, &format!("🏆 {}", games::game_name(&g)), theme::warn()).on_hover_text(t("Show this game's charts")).clicked()
-                {
-                    nav = Some(Nav::Game(g));
-                }
-                if let Some(g) = &c.genre
-                    && theme::chip(ui, g, tag_color(g)).on_hover_text(t("Show this genre")).clicked()
-                {
-                    nav = Some(Nav::Text(3, g.clone(), true));
-                }
-                if let Some(ch) = &c.charter
-                    && theme::chip(ui, &format!("✏ {ch}"), theme::RAINBOW[4]).on_hover_text(t("Show everything charted by this charter")).clicked()
-                {
-                    nav = Some(Nav::Text(5, ch.clone(), false));
-                }
-                if !c.length_text().is_empty() {
-                    theme::tag(ui, &format!("⏱ {}", c.length_text()), theme::RAINBOW[6]);
-                }
-                if !c.uploaded().is_empty() {
-                    theme::tag(ui, &format!("📅 {}", c.uploaded()), Color32::GRAY);
-                }
-            });
+            // One line each: what it is on the left, the value on the right (a link where it
+            // leads somewhere).
+            // Alternate lines are shaded, like the table.
+            let mut line = 0;
+            let mut info = |ui: &mut egui::Ui, label: &str, value: &str, color: Color32, tip: Option<&str>| -> bool {
+                let mut clicked = false;
+                let fill = if line % 2 == 0 { ui.visuals().widgets.inactive.bg_fill } else { Color32::TRANSPARENT };
+                line += 1;
+                egui::Frame::new().fill(fill).corner_radius(CornerRadius::same(5)).inner_margin(egui::Margin::symmetric(8, 4)).show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                crate::theme::hrow(ui, |ui| {
+                    ui.label(RichText::new(label).weak());
+                    ui.with_layout(crate::theme::trailing(), |ui| {
+                        let text = RichText::new(value).color(color).strong();
+                        match tip {
+                            Some(tip) => clicked = link(ui, text, tip),
+                            None => {
+                                ui.add(egui::Label::new(text).truncate());
+                            }
+                        }
+                    });
+                });
+                });
+                clicked
+            };
+            let gap = std::mem::replace(&mut ui.spacing_mut().item_spacing.y, 0.0);
+            if let Some(g) = games::game_key(c.icon.as_deref())
+                && info(ui, &t("🏆  Game"), &games::game_name(&g), theme::warn(), Some(n("Show this game's charts")))
+            {
+                nav = Some(Nav::Game(g));
+            }
+            if let Some(g) = &c.genre
+                && info(ui, &t("🎼  Genre"), g, tag_color(g), Some(n("Show this genre")))
+            {
+                nav = Some(Nav::Text(3, g.clone(), true));
+            }
+            if let Some(ch) = &c.charter
+                && info(ui, &t("✏  Charter"), ch, theme::RAINBOW[4], Some(n("Show everything charted by this charter")))
+            {
+                nav = Some(Nav::Text(5, ch.clone(), false));
+            }
+            if !c.length_text().is_empty() {
+                info(ui, &t("⏱  Length"), &c.length_text(), ui.visuals().text_color(), None);
+            }
+            if !c.uploaded().is_empty() {
+                info(ui, &t("📅  Uploaded"), &c.uploaded(), ui.visuals().text_color(), None);
+            }
+            ui.spacing_mut().item_spacing.y = gap;
 
             ui.add_space(10.0);
             // Download and Preview side by side, half the panel each.
             let (mut download, mut open_preview, mut reveal_it) = (false, false, false);
             let half = ((ui.available_width() - ui.spacing().item_spacing.x) / 2.0).max(60.0);
             let busy = self.job.is_some();
-            ui.horizontal(|ui| {
+            crate::theme::hrow(ui, |ui| {
                 if downloaded {
                     let good = theme::good();
                     let button = egui::Button::new(RichText::new(t("📂  Show in folder")).strong().color(good))
@@ -2345,12 +2826,12 @@ impl App {
                         .inner_margin(egui::Margin::symmetric(10, 6))
                         .show(ui, |ui| {
                             ui.set_width(ui.available_width());
-                            ui.horizontal(|ui| {
+                            crate::theme::hrow(ui, |ui| {
                                 if link_ex(ui, RichText::new(format!("{}  {}", instrument_icon(k as u8), t(name))).strong(), n("Show charts for this instrument"), false) {
                                     nav = Some(Nav::Instrument(k as u8));
                                 }
                                 if d >= 0 {
-                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    ui.with_layout(crate::theme::trailing(), |ui| {
                                         let resp = ui.add(egui::Label::new(theme::difficulty_dots(d)).sense(Sense::click()));
                                         if resp.on_hover_text(tr!("Intensity {level}: show {instrument} charts at this intensity", level = d, instrument = t(name))).clicked() {
                                             nav = Some(Nav::Difficulty(k as u8, d));
@@ -2369,7 +2850,7 @@ impl App {
             self.scores.show(ui, &c, self.filters.difficulty.unwrap_or(0));
             ui.add_space(10.0);
             section(ui, "features", &t("Features"), None, |ui| {
-                ui.horizontal_wrapped(|ui| {
+                crate::theme::hrow_wrapped(ui, |ui| {
                     let any = feature_tags(ui, &c, true, &mut nav);
                     if !any {
                         ui.weak(t("None"));
@@ -2403,9 +2884,9 @@ impl App {
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
             .default_width(520.0)
             .show(ctx, |ui| {
-                ui.horizontal(|ui| {
+                crate::theme::hrow(ui, |ui| {
                     ui.label(RichText::new(t("🐞  Report an issue")).strong().size(15.0));
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.with_layout(crate::theme::trailing(), |ui| {
                         let close = ui.add(egui::Button::new(RichText::new("✖").size(13.0)).frame(false)).on_hover_text(t("Close"));
                         if close.clicked() {
                             open = false;
@@ -2417,17 +2898,19 @@ impl App {
                 ui.vertical_centered(|ui| ui.label(t("Something not working, or an idea for Rainbow? Let us know.")));
                 ui.add_space(12.0);
                 // Three tiles side by side: a big icon, the title and a line about it.
+                // Each its own colour: Discord's blurple, GitHub red for bugs, green for helping.
                 let choices = [
-                    (t("💬  Ask on Discord"), t("Quick help and chat in the Renzora Discord."), "https://discord.gg/x6KHzEe2j2"),
-                    (t("🐛  Report on GitHub"), t("Open an issue for a bug or a feature request."), "https://github.com/renzora/rainbow/issues/new"),
-                    (t("🤝  Contribute"), t("How to help with code or translations."), "https://github.com/renzora/rainbow/blob/main/CONTRIBUTING.md"),
+                    (t("💬  Ask on Discord"), t("Quick help and chat in the Renzora Discord."), "https://discord.gg/x6KHzEe2j2", Color32::from_rgb(88, 101, 242)),
+                    (t("🐛  Report on GitHub"), t("Open an issue for a bug or a feature request."), "https://github.com/renzora/rainbow/issues/new", Color32::from_rgb(218, 74, 72)),
+                    (t("🤝  Contribute"), t("How to help with code or translations."), "https://github.com/renzora/rainbow/blob/main/CONTRIBUTING.md", Color32::from_rgb(38, 150, 104)),
                 ];
                 ui.columns(3, |cols| {
-                    for (ui, (title, about, url)) in cols.iter_mut().zip(&choices) {
+                    for (ui, (title, about, url, color)) in cols.iter_mut().zip(&choices) {
                         let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 128.0), Sense::click());
                         resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, title.as_str()));
-                        let fill = if resp.hovered() { ui.visuals().widgets.hovered.weak_bg_fill } else { ui.visuals().widgets.inactive.weak_bg_fill };
+                        let fill = color.linear_multiply(if resp.hovered() { 0.42 } else { 0.24 });
                         ui.painter().rect_filled(rect, 8.0, fill);
+                        ui.painter().rect_stroke(rect, 8.0, egui::Stroke::new(1.0, color.linear_multiply(0.7)), egui::StrokeKind::Inside);
                         let (icon, name) = title.split_once("  ").unwrap_or(("", title.as_str()));
                         ui.scope_builder(egui::UiBuilder::new().max_rect(rect.shrink(10.0)), |ui| {
                             ui.vertical_centered(|ui| {
@@ -2444,7 +2927,7 @@ impl App {
                 });
                 ui.add_space(10.0);
                 ui.separator();
-                ui.horizontal(|ui| {
+                crate::theme::hrow(ui, |ui| {
                     if ui.button(t("📋  Copy details")).on_hover_text(t("Rainbow's version, your system and the latest log lines, to paste into a report")).clicked() {
                         let lines: Vec<&str> = self.log.iter().rev().take(25).rev().map(String::as_str).collect();
                         let details = format!(
@@ -2488,12 +2971,12 @@ impl App {
                 ui.weak(t("You can stop at any time; next time it picks up where it left off."));
                 ui.add_space(8.0);
                 theme::checkbox(ui, &mut self.settings.video, &t("🎬 Download video backgrounds (much larger)"));
-                ui.horizontal(|ui| {
+                crate::theme::hrow(ui, |ui| {
                     ui.label(t("Format:"));
                     ui.radio_value(&mut self.settings.format, DownloadFormat::Sng, ".sng");
                     ui.radio_value(&mut self.settings.format, DownloadFormat::Folder, t("Chart Folder"));
                 });
-                ui.horizontal(|ui| {
+                crate::theme::hrow(ui, |ui| {
                     ui.label(t("Wait between downloads:"));
                     ui.add(egui::Slider::new(&mut self.settings.delay_secs, 0.5..=10.0).suffix(" s"));
                 });
@@ -2501,7 +2984,7 @@ impl App {
                 ui.weak(tr!("Roughly {hours}+ hours at that pace (plus download time).", hours = format!("{hours:.0}")));
                 ui.weak(t("Encore is donation-funded; please keep the delay reasonable."));
                 ui.add_space(8.0);
-                ui.horizontal(|ui| {
+                crate::theme::hrow(ui, |ui| {
                     if ui.add(theme::primary(t("Start"))).clicked() {
                         decision = Some(true);
                     }
@@ -2559,7 +3042,7 @@ impl App {
                     ui.weak(t("Next time it picks up where it left off."));
                 }
                 ui.add_space(8.0);
-                ui.horizontal(|ui| {
+                crate::theme::hrow(ui, |ui| {
                     if ui.add(theme::primary(t("Keep downloading"))).clicked() {
                         keep = true;
                     }
@@ -2595,18 +3078,42 @@ impl App {
             ui.horizontal_top(|ui| {
                 ui.add_space(((avail - width) / 2.0).max(0.0));
                 let s = &mut self.settings;
+                // Columns exactly a card wide (Library and Downloads first: on the left, or the
+                // right in a right-to-left language).
+                let column = |ui: &mut egui::Ui, add: &mut dyn FnMut(&mut egui::Ui)| {
+                    ui.allocate_ui_with_layout(vec2(card_w, 0.0), egui::Layout::top_down(egui::Align::Min), |ui| add(ui));
+                };
                 if two {
-                    ui.vertical(|ui| {
+                    let updates = &mut self.updates;
+                    let mut first = |ui: &mut egui::Ui| {
                         library_card(ui, s, card_w, busy, example.as_ref(), &mut actions);
                         downloads_card(ui, s, card_w, busy, &mut actions);
-                    });
-                    ui.add_space(16.0);
-                    ui.vertical(|ui| {
-                        appearance_card(ui, s, card_w);
-                        accessibility_card(ui, s, card_w, &mut actions);
-                        catalogue_card(ui, s, card_w, building, &mut actions);
-                        updates_card(ui, s, card_w, &mut self.updates);
-                    });
+                    };
+                    if i18n::rtl() {
+                        let mut second = |ui: &mut egui::Ui| {
+                            appearance_card(ui, s, card_w);
+                            accessibility_card(ui, s, card_w, &mut actions);
+                            catalogue_card(ui, s, card_w, building, &mut actions);
+                            updates_card(ui, s, card_w, updates);
+                        };
+                        column(ui, &mut second);
+                        ui.add_space(16.0);
+                        let mut first = |ui: &mut egui::Ui| {
+                            library_card(ui, s, card_w, busy, example.as_ref(), &mut actions);
+                            downloads_card(ui, s, card_w, busy, &mut actions);
+                        };
+                        column(ui, &mut first);
+                    } else {
+                        column(ui, &mut first);
+                        ui.add_space(16.0);
+                        let mut second = |ui: &mut egui::Ui| {
+                            appearance_card(ui, s, card_w);
+                            accessibility_card(ui, s, card_w, &mut actions);
+                            catalogue_card(ui, s, card_w, building, &mut actions);
+                            updates_card(ui, s, card_w, updates);
+                        };
+                        column(ui, &mut second);
+                    }
                 } else {
                     ui.vertical(|ui| {
                         library_card(ui, s, card_w, busy, example.as_ref(), &mut actions);
@@ -2730,7 +3237,7 @@ fn settings_card(ui: &mut egui::Ui, width: f32, title: &str, about: &str, add: i
         .outer_margin(egui::Margin { left: 0, right: 0, top: 0, bottom: 16 })
         .show(ui, |ui| {
             ui.set_width(width - 38.0);
-            ui.vertical(|ui| {
+            crate::theme::vcol(ui, |ui| {
                 ui.label(RichText::new(title).size(19.0).strong().color(theme::accent_hover()));
                 ui.label(RichText::new(about).size(13.5).weak());
                 ui.add_space(10.0);
@@ -2747,10 +3254,11 @@ fn setting_row(ui: &mut egui::Ui, label: &str, about: &str, control: impl FnOnce
     // frame), so long descriptions never run under the buttons.
     let id = ui.id().with(("setting_row", label));
     let control_w = ui.data(|d| d.get_temp::<f32>(id)).unwrap_or(0.0);
-    ui.horizontal(|ui| {
+    crate::theme::hrow(ui, |ui| {
         let text_w = (ui.available_width() - control_w - 16.0).max(140.0);
-        ui.vertical(|ui| {
-            ui.set_max_width(text_w);
+        let align = if i18n::rtl() { egui::Align::Max } else { egui::Align::Min };
+        ui.allocate_ui_with_layout(vec2(text_w, 0.0), egui::Layout::top_down(align), |ui| {
+            ui.set_width(text_w);
             ui.spacing_mut().item_spacing.y = 2.0;
             ui.add(egui::Label::new(RichText::new(label).size(15.5).strong()).wrap());
             if !about.is_empty() {
@@ -2758,7 +3266,7 @@ fn setting_row(ui: &mut egui::Ui, label: &str, about: &str, control: impl FnOnce
             }
         });
         let measured = ui
-            .with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            .with_layout(crate::theme::trailing(), |ui| {
                 control(ui);
                 ui.min_rect().width()
             })
@@ -2900,7 +3408,7 @@ fn downloads_card(ui: &mut egui::Ui, s: &mut Settings, width: f32, busy: bool, a
 fn appearance_card(ui: &mut egui::Ui, s: &mut Settings, width: f32) {
     settings_card(ui, width, &t("🎨  Appearance"), &t("Theme, size and what the results table shows."), |ui| {
         setting_row(ui, &t("Theme"), &t("Colours for the whole app."), |_| {});
-        ui.horizontal_wrapped(|ui| {
+        crate::theme::hrow_wrapped(ui, |ui| {
             ui.spacing_mut().item_spacing = vec2(10.0, 10.0);
             for kind in theme::ThemeKind::ALL {
                 if theme_swatch(ui, kind, s.theme == kind).clicked() {
@@ -2922,8 +3430,16 @@ fn appearance_card(ui: &mut egui::Ui, s: &mut Settings, width: f32) {
                 s.cover_size = s.density.cover_size();
             }
         });
+        setting_row(ui, &t("Default order"), &t("How the song list is ordered when Rainbow opens."), |ui| {
+            let current = SORTS.iter().find(|o| o.0 == s.default_sort).map_or_else(String::new, |o| t(o.1));
+            egui::ComboBox::from_id_salt("default_order").selected_text(current).width(200.0).show_ui(ui, |ui| {
+                for (key, name) in SORTS {
+                    ui.selectable_value(&mut s.default_sort, key, t(name));
+                }
+            });
+        });
         setting_row(ui, &t("Table columns"), &t("Columns also hide automatically when the window is narrow."), |_| {});
-        ui.horizontal_wrapped(|ui| {
+        crate::theme::hrow_wrapped(ui, |ui| {
             ui.spacing_mut().item_spacing = vec2(18.0, 10.0);
             let c = &mut s.columns;
             for (on, label) in [
@@ -2937,7 +3453,7 @@ fn appearance_card(ui: &mut egui::Ui, s: &mut Settings, width: f32) {
                 (&mut c.difficulty, n("Difficulty")),
                 (&mut c.uploaded, n("Upload Date")),
             ] {
-                theme::checkbox(ui, on, label);
+                theme::checkbox(ui, on, &t(label));
             }
         });
     });
@@ -2949,10 +3465,10 @@ fn accessibility_card(ui: &mut egui::Ui, s: &mut Settings, width: f32, actions: 
         for font in theme::UiFont::ALL {
             let selected = s.font == font;
             let family = egui::FontFamily::Name(font.key().into());
-            let resp = ui.horizontal(|ui| {
+            let resp = crate::theme::hrow(ui, |ui| {
                 let mut on = selected;
                 let clicked = theme::checkbox(ui, &mut on, "").clicked();
-                ui.vertical(|ui| {
+                crate::theme::vcol(ui, |ui| {
                     ui.spacing_mut().item_spacing.y = 1.0;
                     ui.label(RichText::new(t(font.name())).family(family.clone()).size(16.5));
                     ui.label(RichText::new(t(font.about())).size(12.5).weak());
@@ -3066,17 +3582,17 @@ fn theme_swatch(ui: &mut egui::Ui, kind: theme::ThemeKind, selected: bool) -> eg
 /// A vertical scroll area that uses Rainbow's chunky scroll bar instead of egui's.
 pub(crate) fn fancy_scroll<R>(ui: &mut egui::Ui, id: &str, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
     let full = ui.available_rect_before_wrap();
-    let area = full.with_max_x(full.right() - theme::SCROLLBAR_W - 6.0);
+    // The scroll bar goes on the right, or the left in a right-to-left language.
+    let rtl = i18n::rtl();
+    let area = if rtl { full.with_min_x(full.left() + theme::SCROLLBAR_W + 6.0) } else { full.with_max_x(full.right() - theme::SCROLLBAR_W - 6.0) };
     let mut child = ui.new_child(egui::UiBuilder::new().max_rect(area));
     let out = egui::ScrollArea::vertical()
         .id_salt(id)
         .auto_shrink([false, false])
         .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
         .show(&mut child, add);
-    let bar = egui::Rect::from_min_max(
-        egui::pos2(full.right() - theme::SCROLLBAR_W, out.inner_rect.top()),
-        egui::pos2(full.right(), out.inner_rect.bottom()),
-    );
+    let bar_x = if rtl { full.left() } else { full.right() - theme::SCROLLBAR_W };
+    let bar = egui::Rect::from_min_max(egui::pos2(bar_x, out.inner_rect.top()), egui::pos2(bar_x + theme::SCROLLBAR_W, out.inner_rect.bottom()));
     let view = out.inner_rect.height();
     if let Some(offset) = theme::scrollbar(ui, bar, out.id.with("bar"), out.state.offset.y, out.content_size.y, view) {
         let mut state = out.state;
@@ -3093,6 +3609,12 @@ pub(crate) fn fancy_scroll<R>(ui: &mut egui::Ui, id: &str, add: impl FnOnce(&mut
 /// collapses it when clicked. Sections start open and stay as they were left for the rest of the
 /// session; `id` keeps that the same whatever the language. `tip` is shown when hovering the header.
 pub(crate) fn section(ui: &mut egui::Ui, id: &str, title: &str, tip: Option<&str>, add: impl FnOnce(&mut egui::Ui)) {
+    section_ex(ui, id, title, tip, None, add);
+}
+
+/// A [`section`] with a small button at the far end of its header (e.g. "Refresh"); returns
+/// whether it was clicked.
+pub(crate) fn section_ex(ui: &mut egui::Ui, id: &str, title: &str, tip: Option<&str>, action: Option<&str>, add: impl FnOnce(&mut egui::Ui)) -> bool {
     let mut state = egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), ui.make_persistent_id(("detail_section", id)), true);
     let (rect, mut resp) = ui.allocate_exact_size(vec2(ui.available_width(), 32.0), Sense::click());
     resp = resp.on_hover_cursor(CursorIcon::PointingHand);
@@ -3114,22 +3636,43 @@ pub(crate) fn section(ui: &mut egui::Ui, id: &str, title: &str, tip: Option<&str
         painter.line_segment([egui::pos2(x - rect.height(), rect.bottom()), egui::pos2(x, rect.top())], stripe);
         x += 14.0;
     }
-    painter.rect_filled(egui::Rect::from_min_size(rect.min, vec2(4.0, rect.height())), CornerRadius { nw: 6, sw: 6, ne: 0, se: 0 }, accent);
+    // Mirrored in right-to-left languages: the accent edge, arrow and title start on the right.
+    let rtl = i18n::rtl();
+    let edge = if rtl {
+        (egui::Rect::from_min_max(egui::pos2(rect.right() - 4.0, rect.top()), rect.max), CornerRadius { nw: 0, sw: 0, ne: 6, se: 6 })
+    } else {
+        (egui::Rect::from_min_size(rect.min, vec2(4.0, rect.height())), CornerRadius { nw: 6, sw: 6, ne: 0, se: 0 })
+    };
+    painter.rect_filled(edge.0, edge.1, accent);
 
-    // Arrow: points right when closed, down when open.
+    // Arrow: points towards the text's end when closed (right, or left), down when open.
     let openness = state.openness(ui.ctx());
-    let center = egui::pos2(rect.left() + 20.0, rect.center().y);
-    let angle = (openness - 1.0) * std::f32::consts::FRAC_PI_2;
-    let rot = egui::emath::Rot2::from_angle(angle);
+    let start = |d: f32| if rtl { rect.right() - d } else { rect.left() + d };
+    let center = egui::pos2(start(20.0), rect.center().y);
+    let closed = if rtl { std::f32::consts::FRAC_PI_2 } else { -std::f32::consts::FRAC_PI_2 };
+    let rot = egui::emath::Rot2::from_angle((1.0 - openness) * closed);
     let arrow = [vec2(-5.0, -3.0), vec2(5.0, -3.0), vec2(0.0, 4.0)].map(|v| center + rot * v);
     let text = ui.visuals().strong_text_color();
     painter.add(egui::Shape::convex_polygon(arrow.to_vec(), text, egui::Stroke::NONE));
-    painter.text(egui::pos2(rect.left() + 34.0, rect.center().y), egui::Align2::LEFT_CENTER, title, egui::FontId::proportional(16.0), text);
+    let align = if rtl { egui::Align2::RIGHT_CENTER } else { egui::Align2::LEFT_CENTER };
+    painter.text(egui::pos2(start(34.0), rect.center().y), align, title, egui::FontId::proportional(16.0), text);
 
+    // The header's button, over the header (so a click on it doesn't fold the section).
+    let mut clicked = false;
+    if let Some(label) = action {
+        let galley = ui.painter().layout_no_wrap(label.to_owned(), egui::FontId::proportional(13.0), text);
+        let size = vec2(galley.size().x + 16.0, 22.0);
+        let x = if rtl { rect.left() + 10.0 + size.x / 2.0 } else { rect.right() - 8.0 - size.x / 2.0 };
+        let button = egui::Rect::from_center_size(egui::pos2(x, rect.center().y), size);
+        // Plain text that lights up on hover (no button frame), on one line.
+        let link = egui::Button::new(RichText::new(label).size(13.0)).frame(false).wrap_mode(egui::TextWrapMode::Extend);
+        clicked = ui.put(button, link).on_hover_cursor(CursorIcon::PointingHand).clicked();
+    }
     state.show_body_unindented(ui, |ui| {
         ui.add_space(4.0);
         add(ui);
     });
+    clicked
 }
 
 /// A main tab. Drawn by hand at a fixed size so nothing moves on hover: filled with `color`
@@ -3264,6 +3807,19 @@ fn tag_color(s: &str) -> Color32 {
 }
 
 /// Right-click menu for a result row.
+/// The two kinds of link to a chart: a web link (clickable anywhere, it opens Rainbow) and the
+/// rainbow:// link itself.
+fn copy_link_items(ui: &mut egui::Ui, md5: &str) {
+    if ui.button(t("🌐  Web link")).on_hover_text(links::share_link(md5)).clicked() {
+        ui.ctx().copy_text(links::share_link(md5));
+        ui.close();
+    }
+    if ui.button(t("🌈  rainbow:// link")).on_hover_text(links::app_link(md5)).clicked() {
+        ui.ctx().copy_text(links::app_link(md5));
+        ui.close();
+    }
+}
+
 fn row_context_menu(ui: &mut egui::Ui, c: &Chart, i: usize, checked: bool, downloaded: bool, action: &mut Option<RowAction>) {
     ui.set_min_width(210.0);
     let mut pick = |ui: &mut egui::Ui, label: &str, a: RowAction| {
@@ -3280,6 +3836,7 @@ fn row_context_menu(ui: &mut egui::Ui, c: &Chart, i: usize, checked: bool, downl
     }
     pick(ui, &t("▶  Preview"), RowAction::Preview(i));
     pick(ui, &if checked { t("☐  Deselect") } else { t("☑  Select") }, RowAction::Toggle(i));
+    ui.menu_button(t("🔗  Copy link"), |ui| copy_link_items(ui, &c.md5));
     ui.separator();
     ui.menu_button(t("📋  Copy"), |ui| {
         let mut items = vec![(n("\"Artist - Song (Charter)\""), c.title())];
@@ -3374,13 +3931,98 @@ fn text_menu(resp: &egui::Response, text: &mut String) -> bool {
 }
 
 /// A round ✖ inside the right end of a text box (`field`). Returns true if clicked.
-fn clear_button(ui: &mut egui::Ui, field: egui::Rect) -> bool {
+/// A difficulty's name after a dot in its colour (green Easy up to purple Expert); a hollow
+/// dot for any difficulty.
+fn difficulty_label(d: Option<u8>) -> egui::text::LayoutJob {
+    let (dot, color, name) = match d {
+        Some(d) => {
+            // DIFFICULTIES runs Expert, Hard, Medium, Easy.
+            let colors = [Color32::from_rgb(170, 95, 235), Color32::from_rgb(235, 90, 60), Color32::from_rgb(240, 190, 40), Color32::from_rgb(60, 190, 90)];
+            ("●", colors[d as usize % 4], t(DIFFICULTIES[d as usize].1))
+        }
+        None => ("○", Color32::from_gray(150), t("Any Difficulty")),
+    };
+    let mut job = egui::text::LayoutJob::default();
+    let font = egui::FontId::proportional(14.0);
+    job.append(dot, 0.0, egui::TextFormat { font_id: font.clone(), color, ..Default::default() });
+    // PLACEHOLDER takes the widget's own text colour.
+    job.append(&name, 6.0, egui::TextFormat { font_id: font, color: Color32::PLACEHOLDER, ..Default::default() });
+    job
+}
+
+/// Where a dragged column would go: the x of the boundary between headers nearest `x`.
+fn column_gap(headers: &[(Col, egui::Rect)], x: f32) -> Option<f32> {
+    let mut edges: Vec<f32> = headers.iter().map(|h| h.1.left()).collect();
+    edges.push(headers.last()?.1.right());
+    edges.into_iter().min_by(|a, b| (a - x).abs().total_cmp(&(b - x).abs()))
+}
+
+/// The fullest of a bar's levels of compactness (0 = in full) that fits in `width`, from the
+/// widths each needed when last drawn; a level not measured yet is tried. Returns one past the
+/// last level if none fits.
+fn pick_level(widths: &[f32], width: f32) -> usize {
+    widths.iter().position(|&w| w == 0.0 || w <= width).unwrap_or(widths.len() - 1)
+}
+
+/// A place in the app for Back and Forward: a tab, the search, and the player profile shown.
+#[derive(Clone, PartialEq)]
+struct Place {
+    tab: Tab,
+    filters: Filters,
+    profile: Option<(u64, String)>,
+}
+
+/// A search as Back and Forward remember it: without data looked up for it along the way.
+fn nav_key(f: &Filters) -> Filters {
+    Filters { played: Default::default(), popular: Vec::new(), track_md5s: None, ..f.clone() }
+}
+
+/// A Back (`left`) or Forward button: a thick arrow on a rounded square, greyed out when
+/// there's nowhere to go. In right-to-left languages the arrows point the other way.
+fn nav_arrow(ui: &mut egui::Ui, left: bool, enabled: bool) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(vec2(34.0, 34.0), if enabled { Sense::click() } else { Sense::hover() });
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, if left { t("Back") } else { t("Forward") }));
+    let visuals = ui.visuals();
+    let hovered = enabled && resp.hovered();
+    let fill = if hovered { visuals.widgets.hovered.bg_fill } else { visuals.widgets.inactive.bg_fill };
+    ui.painter().rect_filled(rect, CornerRadius::same(8), if enabled { fill } else { fill.linear_multiply(0.5) });
+    let color = if !enabled {
+        visuals.weak_text_color().linear_multiply(0.5)
+    } else if hovered {
+        theme::accent_hover()
+    } else {
+        visuals.text_color()
+    };
+    let dir = if left != i18n::rtl() { -1.0 } else { 1.0 };
+    let c = rect.center();
+    // Shaft, then a solid head.
+    let tip = c + vec2(9.0 * dir, 0.0);
+    ui.painter().line_segment([c + vec2(-8.0 * dir, 0.0), c + vec2(1.0 * dir, 0.0)], egui::Stroke::new(4.0, color));
+    let head = vec![tip, c + vec2(0.0, -7.5), c + vec2(0.0, 7.5)];
+    ui.painter().add(egui::Shape::convex_polygon(head, color, egui::Stroke::NONE));
+    if enabled { resp.on_hover_cursor(CursorIcon::PointingHand) } else { resp }
+}
+
+/// Orders the song list can be in (the order menu and the Default order setting).
+const SORTS: [(SortKey, &str); 9] = [
+    (SortKey::Newest, n("Newest on Encore")),
+    (SortKey::Popular, n("Most played on Clone Hero")),
+    (SortKey::Uploaded, n("Recently updated")),
+    (SortKey::Name, n("Name")),
+    (SortKey::Artist, n("Artist")),
+    (SortKey::Charter, n("Charter")),
+    (SortKey::Year, n("Year")),
+    (SortKey::Length, n("Length")),
+    (SortKey::Difficulty, n("Difficulty")),
+];
+
+pub(crate) fn clear_button(ui: &mut egui::Ui, field: egui::Rect, id: &str) -> bool {
     let size = 22.0;
     let rect = egui::Rect::from_center_size(
         egui::pos2(field.right() - 6.0 - size / 2.0, field.center().y),
         vec2(size, size),
     );
-    let resp = ui.interact(rect, egui::Id::new("search_clear"), Sense::click());
+    let resp = ui.interact(rect, egui::Id::new(("search_clear", id)), Sense::click());
     resp.widget_info(|| {
         egui::WidgetInfo::labeled(egui::WidgetType::Button, true, t("Clear search"))
     });
@@ -3540,7 +4182,61 @@ fn range_row(ui: &mut egui::Ui, label: &str, r: &mut Range, tip: &str, label_w: 
     text_menu(&min, &mut r.min);
     let max = ui.add_sized([64.0, 24.0], egui::TextEdit::singleline(&mut r.max).hint_text(t("Max")));
     text_menu(&max, &mut r.max);
-    ui.end_row();
+}
+
+/// A two-handle slider for a range from `lo` to `hi`. It follows the Min and Max boxes (an empty
+/// or out-of-range box puts its handle at that end); dragging a handle writes the box, and
+/// dragging it to the end clears it (no limit).
+/// A rough length of time: "45 s", "12 min", "3 h 20 min", "2 days 5 h".
+fn duration_words(secs: f64) -> String {
+    let s = secs.max(0.0).round() as u64;
+    match s {
+        0..60 => tr!("{n} s", n = s),
+        60..3600 => tr!("{n} min", n = s.div_ceil(60)),
+        3600..86400 => tr!("{h} h {m} min", h = s / 3600, m = s % 3600 / 60),
+        _ => tr!("{d} days {h} h", d = s / 86400, h = s % 86400 / 3600),
+    }
+}
+
+fn range_slider(ui: &mut egui::Ui, label: &str, r: &mut Range, lo: f64, hi: f64, step: f64) {
+    let width = ui.available_width();
+    let (rect, _) = ui.allocate_exact_size(vec2(width, 18.0), Sense::hover());
+    let track = rect.shrink2(vec2(8.0, 0.0));
+    let x_of = |v: f64| track.left() + ((v.clamp(lo, hi) - lo) / (hi - lo)) as f32 * track.width();
+    let v_of = |x: f32| {
+        let v = lo + ((x - track.left()) / track.width()).clamp(0.0, 1.0) as f64 * (hi - lo);
+        (v / step).round() * step
+    };
+    let min = r.min.trim().parse::<f64>().ok();
+    let max = r.max.trim().parse::<f64>().ok();
+    let (a, b) = (x_of(min.unwrap_or(lo)), x_of(max.unwrap_or(hi)));
+    let accent = theme::accent();
+    let p = ui.painter();
+    let y = rect.center().y;
+    p.line_segment([egui::pos2(track.left(), y), egui::pos2(track.right(), y)], egui::Stroke::new(4.0, ui.visuals().widgets.inactive.bg_fill));
+    p.line_segment([egui::pos2(a, y), egui::pos2(b, y)], egui::Stroke::new(4.0, accent.linear_multiply(0.8)));
+    let fmt = |v: f64| if step >= 1.0 { format!("{v:.0}") } else { format!("{v}") };
+    for (k, x) in [a, b].into_iter().enumerate() {
+        let handle = egui::Rect::from_center_size(egui::pos2(x, y), vec2(16.0, 16.0));
+        let resp = ui.interact(handle, ui.id().with((label, k)), Sense::drag());
+        resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Slider, true, if k == 0 { t("Min") } else { t("Max") }));
+        let hot = resp.hovered() || resp.dragged();
+        ui.painter().circle(egui::pos2(x, y), if hot { 7.5 } else { 6.5 }, accent, egui::Stroke::new(2.0, Color32::WHITE));
+        let resp = resp.on_hover_cursor(CursorIcon::Grab);
+        if resp.dragged()
+            && let Some(pos) = resp.interact_pointer_pos()
+        {
+            ui.ctx().set_cursor_icon(CursorIcon::Grabbing);
+            // Handles can't cross; at the ends the box is cleared.
+            if k == 0 {
+                let v = v_of(pos.x).min(max.unwrap_or(hi));
+                r.min = if v <= lo { String::new() } else { fmt(v) };
+            } else {
+                let v = v_of(pos.x).max(min.unwrap_or(lo));
+                r.max = if v >= hi { String::new() } else { fmt(v) };
+            }
+        }
+    }
 }
 
 /// Opens the file manager with `path` selected (or its folder, where selecting isn't supported).
@@ -3622,16 +4318,30 @@ impl eframe::App for App {
         if self.job.is_some() {
             egui::Panel::bottom("download").show(ui, |ui| self.download_bar(ui));
         }
-        self.log_panel(ui);
+        {
+            // The log's resize line looks like the table's column bars (thick, the same colour).
+            let normal = ui.style().clone();
+            let w = &mut ui.visuals_mut().widgets;
+            w.noninteractive.bg_stroke.width = 3.0;
+            w.hovered.fg_stroke = w.hovered.bg_stroke;
+            w.hovered.fg_stroke.width = 4.0;
+            w.active.fg_stroke = w.active.bg_stroke;
+            w.active.fg_stroke.width = 4.0;
+            ui.style_mut().interaction.resize_grab_radius_side = 7.0;
+            self.log_panel(ui, &normal);
+            ui.set_style(normal);
+        }
         match self.tab {
             Tab::Browse => {
-                let search = egui::Panel::top("search").show(ui, |ui| {
+                egui::Panel::top("search").show(ui, |ui| {
                     ui.add_space(8.0);
                     self.search_bar(ui);
+                    // The Advanced search panel opens from here, above the active-filter chips,
+                    // so a chip appearing as you set a filter doesn't push the panel down.
+                    self.search_bottom = ui.min_rect().bottom() + 4.0;
                     self.active_filters(ui);
                     ui.add_space(8.0);
                 });
-                self.search_bottom = search.response.rect.bottom();
                 if self.detail.is_some() {
                     // Give the panel's resize line the same look as the table's column bars.
                     let normal = ui.style().clone();
@@ -3642,7 +4352,8 @@ impl eframe::App for App {
                     w.active.fg_stroke = w.active.bg_stroke;
                     w.active.fg_stroke.width = 4.0;
                     ui.style_mut().interaction.resize_grab_radius_side = 7.0;
-                    egui::Panel::right("detail").resizable(true).default_size(310.0).size_range(260.0..=640.0).show(ui, |ui| {
+                    let side = if i18n::rtl() { egui::Panel::left("detail") } else { egui::Panel::right("detail") };
+                    side.resizable(true).default_size(310.0).size_range(260.0..=640.0).show(ui, |ui| {
                         ui.set_style(normal.clone());
                         self.detail_panel(ui);
                     });
@@ -3654,7 +4365,7 @@ impl eframe::App for App {
                 self.advanced_overlay(&ctx);
             }
             Tab::Players => {
-                if self.players.players_tab(ui, self.prev_tab.is_some())
+                if self.players.players_tab(ui, self.prev_tab.is_some(), &self.charts, &mut self.covers)
                     && let Some(tab) = self.prev_tab.take()
                 {
                     self.tab = tab;
@@ -3671,8 +4382,21 @@ impl eframe::App for App {
         // screenshot for the blur is taken.
         // Requests from the player profile: open another player, or search the catalogue.
         self.players.take_requests(&ctx);
+        self.open_pending_link();
+        self.track_history(&ctx);
+        if std::mem::take(&mut self.focus_window) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+        }
         if let Some(q) = ctx.data_mut(|d| d.remove_temp::<String>(players::search_request_id())) {
-            self.filters.query = q;
+            // A fresh search: just this text, every other filter cleared (the order stays). A
+            // chart's MD5 (New on Encore) also opens its details, like a shared link.
+            if filter::hash_in(&q).is_some_and(|h| h.len() == 32) {
+                self.pending_link = Some(q.to_lowercase());
+            } else {
+                let f = &mut self.filters;
+                *f = Filters { query: q, sort: f.sort, descending: f.descending, ..Filters::default() };
+            }
             self.tab = Tab::Browse;
             self.live_edited = Instant::now();
         }
@@ -3716,7 +4440,7 @@ fn search_syntax_help(ui: &mut egui::Ui) {
     ui.set_max_width(420.0);
     ui.strong(t("Search tips"));
     ui.add_space(4.0);
-    let rows: [(&str, &str); 9] = [
+    let rows: [(&str, &str); 12] = [
         ("\"one\"", n("Exact words or phrase")),
         ("-live", n("Leave out results with this word")),
         (
@@ -3729,6 +4453,8 @@ fn search_syntax_help(ui: &mut egui::Ui) {
         ),
         ("length:>5  length:3..6", n("Song length in minutes")),
         ("diff:5..6", n("Difficulty rating (0–6)")),
+        ("notes:>1000", n("Note count (for the instrument and difficulty picked)")),
+        ("user:nadxa  u:nadxa", n("Charts a Clone Hero player has played recently or most")),
         (
             "has:lyrics  has:solo  has:video",
             n("Charts with this feature"),
@@ -3741,6 +4467,7 @@ fn search_syntax_help(ui: &mut egui::Ui) {
             "-has:video  -artist:\"tribute\"",
             n("Put - in front of any of these to exclude"),
         ),
+        ("a: the killers  ch:  y:  d:  l:  n:", n("Short forms: artist, charter, year, difficulty, length, name; a space after the colon is fine")),
     ];
     egui::Grid::new("search_syntax")
         .num_columns(2)

@@ -1,6 +1,6 @@
 [package]
 name = "rainbow"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 description = "Search and download Clone Hero charts from Chorus Encore"
 license = "MIT OR Apache-2.0"
@@ -24,6 +24,8 @@ sha2 = "0.11.0"
 sys-locale = "0.3.2"
 vorbis_rs = "0.5.6"
 zip = { version = "9.0.1", default-features = false, features = ["deflate"] }
+ar-reshaper = "1.5.0"
+unicode-bidi = "0.3.18"
 
 # Unpacking Linux release downloads (.tar.gz) for the updater.
 [target.'cfg(target_os = "linux")'.dependencies]

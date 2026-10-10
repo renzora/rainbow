@@ -112,7 +112,7 @@ impl Panel {
         crate::section(ui, "leaderboard", &t("🏆  Clone Hero Leaderboard"), None, |ui| self.contents(ui, c, instrument, difficulty));
     }
 
-    fn contents(&mut self, ui: &mut egui::Ui, c: &Chart, instrument: Option<u8>, difficulty: Option<u8>) {
+    pub(crate) fn contents(&mut self, ui: &mut egui::Ui, c: &Chart, instrument: Option<u8>, difficulty: Option<u8>) {
         let ctx = ui.ctx().clone();
         let new_chart = self.md5 != c.md5;
         if new_chart {
@@ -153,7 +153,7 @@ impl Panel {
             self.difficulty = wanted.filter(|d| difficulties.contains(d)).unwrap_or(difficulties[0]);
         }
 
-        ui.horizontal_wrapped(|ui| {
+        crate::theme::hrow_wrapped(ui, |ui| {
             egui::ComboBox::from_id_salt("leaderboard_instrument")
                 .selected_text(instrument_name(self.instrument))
                 .show_ui(ui, |ui| {
@@ -198,7 +198,7 @@ impl Panel {
 }
 
 fn loading(ui: &mut egui::Ui, text: &str) {
-    ui.horizontal(|ui| {
+    crate::theme::hrow(ui, |ui| {
         ui.spinner();
         ui.weak(text);
     });
@@ -211,10 +211,13 @@ fn show_board(ui: &mut egui::Ui, b: &Board, instrument: &str, difficulty: &str) 
     }
     ui.spacing_mut().item_spacing.y = 2.0;
     for (row, e) in b.entries.iter().enumerate() {
-        let fill = if row % 2 == 0 { ui.visuals().widgets.inactive.bg_fill } else { Color32::TRANSPARENT };
-        egui::Frame::new().fill(fill).corner_radius(CornerRadius::same(6)).inner_margin(egui::Margin::symmetric(8, 4)).show(ui, |ui| {
+        // The top three on gold, silver and bronze (painted behind once the row's size is known).
+        let podium = crate::players::medal(e.placement).is_some();
+        let fill = if row % 2 == 0 && !podium { ui.visuals().widgets.inactive.bg_fill } else { Color32::TRANSPARENT };
+        let background = ui.painter().add(egui::Shape::Noop);
+        let frame = egui::Frame::new().fill(fill).corner_radius(CornerRadius::same(6)).inner_margin(egui::Margin::symmetric(8, 4)).show(ui, |ui| {
             ui.set_width(ui.available_width());
-            ui.horizontal(|ui| {
+            crate::theme::hrow(ui, |ui| {
                 let medal = match e.placement {
                     1 => Color32::from_rgb(240, 190, 40),
                     2 => Color32::from_rgb(190, 195, 205),
@@ -230,7 +233,10 @@ fn show_board(ui: &mut egui::Ui, b: &Board, instrument: &str, difficulty: &str) 
                 } else {
                     ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, format!("#{}", e.placement), egui::FontId::proportional(13.0), medal);
                 }
-                ui.vertical(|ui| {
+                if let Ok(id) = e.account.parse::<u64>() {
+                    crate::players::small_avatar(ui, id, &e.username, 26.0);
+                }
+                crate::theme::vcol(ui, |ui| {
                     ui.spacing_mut().item_spacing.y = 0.0;
                     let name = ui.add(egui::Label::new(RichText::new(&e.username).strong()).truncate().sense(Sense::click()));
                     if name.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(t("Open this player's profile")).clicked() {
@@ -246,25 +252,28 @@ fn show_board(ui: &mut egui::Ui, b: &Board, instrument: &str, difficulty: &str) 
                     if e.controller == "Gamepad" {
                         details.push_str("  ·  🎮");
                     }
-                    ui.horizontal(|ui| {
+                    crate::theme::hrow(ui, |ui| {
                         ui.spacing_mut().item_spacing.x = 4.0;
                         ui.label(RichText::new(details).size(12.0).weak());
                         if e.pfc && instrument != "drums" && instrument != "prodrums" {
-                            theme::tag(ui, "PFC", theme::warn());
+                            theme::tag(ui, "👑 PFC", theme::warn());
                         } else if e.fc {
                             theme::tag(ui, "FC", theme::good());
                         }
                     });
                 });
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.with_layout(crate::theme::trailing(), |ui| {
                     ui.label(RichText::new(thousands(e.score)).monospace().strong());
                 });
             });
         });
+        if let Some(shape) = crate::players::podium_background(frame.response.rect, e.placement) {
+            ui.painter().set(background, shape);
+        }
     }
     ui.spacing_mut().item_spacing.y = 6.0;
     let mut refresh = false;
-    ui.horizontal_wrapped(|ui| {
+    crate::theme::hrow_wrapped(ui, |ui| {
         ui.weak(tr!("{players} players  ·  {plays} plays", players = b.players, plays = b.plays));
         refresh = ui.small_button("↻").on_hover_text(t("Refresh the scores")).clicked();
     });

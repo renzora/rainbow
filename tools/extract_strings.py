@@ -23,7 +23,7 @@ def add(text):
 
 # Marked strings: t("…"), tr!("…"), n("…").
 for code in src.values():
-    for m in re.finditer(r'(?<![\w:])(?:t|n)\(' + LIT + r'\)', code):
+    for m in re.finditer(r'(?<![\w:])(?:t|n)\(\s*' + LIT + r'\s*,?\s*\)', code):
         add(m.group(1))
     for m in re.finditer(r'tr!\(\s*' + LIT, code):
         add(m.group(1))
