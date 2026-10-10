@@ -409,7 +409,7 @@ impl App {
                     if let Some(job) = self.job.take() {
                         let how = if self.stop.load(Ordering::Relaxed) { "Stopped" } else { "Finished" };
                         self.log(format!(
-                            "{how}: {} — {} downloaded, {} already had, {} failed",
+                            "{how}: {}: {} downloaded, {} already had, {} failed",
                             job.title,
                             job.downloaded,
                             job.checked - job.downloaded - job.failed,
@@ -675,7 +675,7 @@ impl App {
             ui.add(egui::ProgressBar::new(job.checked as f32 / job.total.max(1) as f32).show_percentage());
             if let Some((title, done, total)) = &job.file {
                 let frac = total.map(|t| *done as f32 / t.max(1) as f32).unwrap_or(0.0);
-                ui.add(egui::ProgressBar::new(frac).text(format!("{title}  —  {:.1} MB", *done as f64 / 1_048_576.0)));
+                ui.add(egui::ProgressBar::new(frac).text(format!("{title}  ({:.1} MB)", *done as f64 / 1_048_576.0)));
             }
         }
         if let Some((s, at)) = &self.status
@@ -914,7 +914,7 @@ impl App {
                 };
                 let todo = confirm.charts.len() - have;
                 ui.strong(&confirm.title);
-                ui.label(format!("{} charts — {have} already downloaded, {todo} to go.", confirm.charts.len()));
+                ui.label(format!("{} charts: {have} already downloaded, {todo} to go.", confirm.charts.len()));
                 ui.label("You can stop at any time; next time it picks up where it left off.");
                 ui.add_space(6.0);
                 ui.checkbox(&mut self.settings.video, "Download video backgrounds (much larger)");
