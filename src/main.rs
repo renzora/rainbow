@@ -973,14 +973,6 @@ impl App {
                     ui.selectable_value(&mut f.game, Some(g.clone()), format!("{}  ({n})", games::game_name(&g)));
                 }
             });
-            // Closes the song details panel, which sits under this corner.
-            if self.detail.is_some() {
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button(t("✖  Close panel")).on_hover_text(t("Hide the song details")).clicked() {
-                        self.detail = None;
-                    }
-                });
-            }
         });
     }
 
@@ -1992,7 +1984,16 @@ impl App {
         fancy_scroll(ui, "detail", |ui| {
             ui.add_space(8.0);
             let size = ui.available_width().min(320.0);
-            ui.vertical_centered(|ui| cover(ui, &mut self.covers, c.art.as_deref(), size, covers::LARGE));
+            let art = ui.vertical_centered(|ui| cover(ui, &mut self.covers, c.art.as_deref(), size, covers::LARGE)).inner;
+            // Close button floating in the cover's top-right corner.
+            let label = RichText::new(t("✖  Close panel")).color(Color32::WHITE);
+            let text = egui::WidgetText::from(label.clone()).into_galley(ui, Some(egui::TextWrapMode::Extend), f32::INFINITY, egui::TextStyle::Button);
+            let button_size = text.size() + 2.0 * ui.spacing().button_padding;
+            let corner = art.right_top() + vec2(-8.0, 8.0);
+            let close = egui::Button::new(label).fill(Color32::from_black_alpha(170)).corner_radius(CornerRadius::same(8));
+            if ui.place(egui::Rect::from_min_size(corner - vec2(button_size.x, 0.0), button_size), close).on_hover_text(t("Hide the song details")).clicked() {
+                self.detail = None;
+            }
             ui.add_space(8.0);
             let title = ui.label(RichText::new(c.name.clone().unwrap_or_else(|| t("Unknown"))).heading().strong());
             copy_menu(&title, &[(n("Copy song name"), c.name.clone().unwrap_or_default()), (n("Copy \"Artist - Song\""), c.title())]);
@@ -2660,11 +2661,11 @@ fn pill(ui: &mut egui::Ui, on: bool, text: &str) -> egui::Response {
 }
 
 /// Album art, or a placeholder while it loads (or if the chart has none).
-fn cover(ui: &mut egui::Ui, covers: &mut Covers, art: Option<&str>, px: f32, size: u32) {
+/// Shows a chart's album art (or a placeholder) and returns where it was drawn.
+fn cover(ui: &mut egui::Ui, covers: &mut Covers, art: Option<&str>, px: f32, size: u32) -> egui::Rect {
     let radius = CornerRadius::same(if px > 100.0 { 10 } else { 5 });
     if let Some(tex) = art.and_then(|a| covers.get(a, size)) {
-        ui.add(egui::Image::new(tex).fit_to_exact_size(vec2(px, px)).corner_radius(radius));
-        return;
+        return ui.add(egui::Image::new(tex).fit_to_exact_size(vec2(px, px)).corner_radius(radius)).rect;
     }
     let (rect, _) = ui.allocate_exact_size(vec2(px, px), Sense::hover());
     let painter = ui.painter();
@@ -2676,6 +2677,7 @@ fn cover(ui: &mut egui::Ui, covers: &mut Covers, art: Option<&str>, px: f32, siz
         egui::FontId::proportional(px * 0.45),
         ui.visuals().weak_text_color(),
     );
+    rect
 }
 
 fn instrument_icon(i: u8) -> &'static str {
