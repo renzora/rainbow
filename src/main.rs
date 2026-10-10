@@ -869,7 +869,7 @@ impl App {
                 }
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                credit(ui, self.renzora.as_ref(), 30.0);
+                credit(ui, self.renzora.as_ref(), 26.0);
                 ui.add_space(12.0);
                 if let Some(job) = &self.job {
                     ui.add(egui::ProgressBar::new(job.checked as f32 / job.total.max(1) as f32).desired_width(140.0).show_percentage());
@@ -2253,21 +2253,31 @@ impl App {
     }
 }
 
-/// "Renzora Studios" with the studio's logo; links to its GitHub.
+/// "Renzora Studios" with the studio's logo in a pill like the header's tabs; links to its
+/// GitHub.
 fn credit(ui: &mut egui::Ui, logo: Option<&egui::TextureHandle>, height: f32) {
-    let text = RichText::new("Renzora Studios").size(13.0).color(ui.visuals().weak_text_color());
-    let resp = match logo {
-        Some(tex) => {
-            let image = egui::Image::new(tex).fit_to_exact_size(vec2(height * 110.0 / 128.0, height));
-            // A little room between the avatar and the name.
-            ui.scope(|ui| {
-                ui.spacing_mut().icon_spacing = 9.0;
-                ui.add(egui::Button::image_and_text(image, text).frame(false))
-            })
-            .inner
-        }
-        None => ui.add(egui::Button::new(text).frame(false)),
-    };
+    // Drawn by hand at its exact size, so it works in the header's right-to-left layout.
+    let text = ui.painter().layout_no_wrap(
+        "Renzora Studios".to_owned(),
+        egui::FontId::new(13.5, egui::FontFamily::Name("bold".into())),
+        ui.visuals().text_color(),
+    );
+    let logo_size = vec2(height * 110.0 / 128.0, height);
+    let (pad_l, gap, pad_r, pad_y) = (6.0, 8.0, 12.0, 3.0);
+    let logo_w = if logo.is_some() { logo_size.x + gap } else { 0.0 };
+    let size = vec2(pad_l + logo_w + text.size().x + pad_r, height.max(text.size().y) + pad_y * 2.0);
+    let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
+    let visuals = ui.visuals();
+    let fill = if resp.hovered() { visuals.widgets.hovered.bg_fill } else { visuals.widgets.inactive.bg_fill };
+    let painter = ui.painter();
+    painter.rect_filled(rect, CornerRadius::same(16), fill);
+    if let Some(tex) = logo {
+        let logo_rect = egui::Rect::from_min_size(egui::pos2(rect.left() + pad_l, rect.center().y - logo_size.y / 2.0), logo_size);
+        painter.image(tex.id(), logo_rect, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), Color32::WHITE);
+    }
+    let text_pos = egui::pos2(rect.left() + pad_l + logo_w, rect.center().y - text.size().y / 2.0);
+    painter.galley(text_pos, text, ui.visuals().text_color());
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Link, true, "Renzora Studios"));
     if resp.on_hover_text(RENZORA_URL).clicked() {
         ui.ctx().open_url(egui::OpenUrl::new_tab(RENZORA_URL));
     }
