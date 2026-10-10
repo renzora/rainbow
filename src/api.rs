@@ -519,7 +519,7 @@ pub fn sanitize_filename(name: &str) -> String {
 }
 
 /// `<dir>/<stem><ext>`, or `<stem> (2)<ext>` etc. if that already exists.
-fn unique_path(dir: &Path, stem: &str, ext: &str) -> PathBuf {
+pub fn unique_path(dir: &Path, stem: &str, ext: &str) -> PathBuf {
     let mut path = dir.join(format!("{stem}{ext}"));
     let mut n = 2;
     while path.exists() {

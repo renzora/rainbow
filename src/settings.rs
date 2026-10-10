@@ -77,6 +77,10 @@ pub struct Settings {
     /// Check Encore for new charts at startup if the catalogue is older than this many hours
     /// (0 = every launch, None = never; the Refresh button always works).
     pub refresh_after_hours: Option<u32>,
+    /// Unpack .zip files that appear in the songs folder.
+    pub auto_extract: bool,
+    /// Delete zips after extracting (otherwise they're moved aside).
+    pub delete_zips: bool,
     /// Cover size in the results table, in points (drag the cover column to change it).
     pub cover_size: f32,
 }
@@ -95,6 +99,8 @@ impl Default for Settings {
             delay_secs: 2.0,
             refresh_after_hours: Some(12),
             cover_size: 42.0,
+            auto_extract: false,
+            delete_zips: false,
         }
     }
 }
