@@ -8,6 +8,7 @@ mod chart;
 mod rockband;
 mod covers;
 mod drums;
+mod datepicker;
 mod dta;
 mod flags;
 mod filter;
@@ -75,7 +76,7 @@ fn main() -> eframe::Result {
         viewport: egui::ViewportBuilder::default()
             .with_title("Rainbow")
             .with_inner_size([1360.0, 860.0])
-            .with_min_inner_size([900.0, 500.0])
+            .with_min_inner_size([1100.0, 600.0])
             .with_icon(eframe::icon_data::from_png_bytes(LOGO_PNG).unwrap_or_default()),
         ..Default::default()
     };
@@ -164,6 +165,8 @@ enum Tab {
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Col {
     Check,
+    /// The favourite star.
+    Fav,
     Cover,
     Name,
     Artist,
@@ -204,6 +207,7 @@ enum RowAction {
     Download(usize),
     Preview(usize),
     Reveal(usize),
+    Favourite(usize),
     Nav(Nav),
 }
 
@@ -248,6 +252,15 @@ struct App {
     search_controls_w: f32,
     /// Row to scroll into view (keyboard navigation).
     scroll_to: Option<usize>,
+    /// The oldest chart's year, for the date picker: (catalogue size it's from, year).
+    oldest: (usize, i16),
+    /// A short message at the bottom of the window: text, an optional link (label, URL), and
+    /// when it appeared.
+    toast: Option<(String, Option<(String, String)>, Instant)>,
+    /// Open the top result in the details panel once the search has run.
+    open_first: bool,
+    /// The chart the details panel showed last frame (a new one starts scrolled to the top).
+    detail_shown: Option<String>,
     /// The first results row drawn last frame, to keep in place while the cover column (and
     /// with it the row height) is being resized.
     first_row: usize,
@@ -271,8 +284,6 @@ struct App {
 
     selected: HashSet<String>,
     anchor: Option<usize>,
-    /// Filters before each click-through, for the Back button.
-    history: Vec<Filters>,
     detail: Option<Chart>,
     preview: Option<preview::Preview>,
     /// Optimal scores shown in the details panel.
@@ -286,6 +297,9 @@ struct App {
     pending_link: Option<String>,
     /// Bring the window to the front (a link was opened).
     focus_window: bool,
+    /// How compact the header is drawn (0 = in full), and its width at each level.
+    header_level: usize,
+    header_widths: [f32; 4],
     /// How compact the results toolbar and status bar are drawn (0 = in full), and the width
     /// each needed at each level when last drawn (0 = not measured yet).
     toolbar_level: usize,
@@ -386,6 +400,10 @@ impl App {
             table_gen: 0,
             table_density: None,
             first_row: 0,
+            detail_shown: None,
+            open_first: false,
+            toast: None,
+            oldest: (usize::MAX, 2010),
             cover_dragging: false,
             search_bottom: 0.0,
             cat_complete: false,
@@ -400,7 +418,6 @@ impl App {
             track_lookup: false,
             selected: HashSet::new(),
             anchor: None,
-            history: Vec::new(),
             detail: None,
             preview: None,
             scores: scores::Scores::new(client.clone()),
@@ -409,6 +426,8 @@ impl App {
             prev_tab: None,
             pending_link: None,
             focus_window: false,
+            header_level: 0,
+            header_widths: [0.0; 4],
             toolbar_level: 0,
             toolbar_widths: [0.0; 4],
             status_level: 0,
@@ -499,6 +518,22 @@ impl App {
         if filters_changed {
             self.scroll_to_top = true;
             self.anchor = None;
+            // The details panel belongs to the results: a search that leaves its chart out closes it.
+            if let Some(d) = &self.detail
+                && !self.results.iter().any(|&i| self.charts[i].md5 == d.md5)
+            {
+                self.detail = None;
+            }
+        }
+        if self.open_first {
+            if let Some(&first) = self.results.first() {
+                let c = self.charts[first].clone();
+                self.selected = HashSet::from([c.md5.clone()]);
+                self.detail = Some(c);
+                self.open_first = false;
+            } else if self.cat_complete && !self.live_searching {
+                self.open_first = false;
+            }
         }
         self.searched = Some((self.filters.clone(), self.charts.len()));
     }
@@ -602,6 +637,10 @@ impl App {
     fn keyboard(&mut self, ctx: &egui::Context) {
         use egui::{Key, KeyboardShortcut, Modifiers};
         let press = |m: Modifiers, k: Key| ctx.input_mut(|i| i.consume_shortcut(&KeyboardShortcut::new(m, k)));
+        // The preview has its own keys (Space, arrows, Esc…).
+        if self.preview.is_some() {
+            return;
+        }
         if press(Modifiers::NONE, Key::F1) {
             self.show_shortcuts = !self.show_shortcuts;
         }
@@ -1043,7 +1082,13 @@ impl App {
     // ─────────────────────────────── Header ───────────────────────────────
 
     fn header(&mut self, ui: &mut egui::Ui) {
+        // As fully as fits: then "Renzora Studios" becomes just its logo and the progress bar
+        // shortens, then the RAINBOW title goes (the logo stays).
+        let full = ui.available_width();
+        self.header_level = pick_level(&self.header_widths, full - 8.0).min(2);
+        let level = self.header_level;
         crate::theme::hrow(ui, |ui| {
+            let start = ui.cursor();
             if let Some(logo) = &self.logo {
                 ui.add(egui::Image::new(logo).fit_to_exact_size(vec2(36.0, 36.0)).corner_radius(CornerRadius::same(9)));
             }
@@ -1055,7 +1100,9 @@ impl App {
                 ui.ctx().request_repaint_after(Duration::from_millis(60));
                 (ui.input(|i| i.time) / 12.0).fract() as f32
             };
-            ui.label(theme::title(24.0, phase));
+            if level < 2 {
+                ui.label(theme::title(24.0, phase));
+            }
             ui.add_space(18.0);
             for (tab, label) in [
                 (Tab::Browse, n("🎵  Charts")),
@@ -1075,15 +1122,22 @@ impl App {
                     self.tab = tab;
                 }
             }
-            ui.with_layout(crate::theme::trailing(), |ui| {
-                credit(ui, self.renzora.as_ref(), 26.0);
-                ui.add_space(12.0);
-                if let Some(job) = &self.job {
-                    ui.add(crate::theme::Bar::new(job.checked as f32 / job.total.max(1) as f32).desired_width(140.0).show_percentage());
-                    ui.label(RichText::new(job.downloaded.to_string()).color(theme::good()));
-                    ui.add(download_icon(14.0, theme::good()));
-                }
-            });
+            let left = (ui.cursor().left() - start.left()).abs().max((start.right() - ui.cursor().right()).abs());
+            let right = ui
+                .with_layout(crate::theme::trailing(), |ui| {
+                    let from = ui.cursor();
+                    credit(ui, self.renzora.as_ref(), 26.0, level >= 1);
+                    ui.add_space(12.0);
+                    if let Some(job) = &self.job {
+                        let bar_w = if level == 0 { 140.0 } else { 80.0 };
+                        ui.add(crate::theme::Bar::new(job.checked as f32 / job.total.max(1) as f32).desired_width(bar_w).show_percentage());
+                        ui.label(RichText::new(job.downloaded.to_string()).color(theme::good()));
+                        ui.add(download_icon(14.0, theme::good()));
+                    }
+                    (from.right() - ui.cursor().right()).abs().max((ui.cursor().left() - from.left()).abs())
+                })
+                .inner;
+            self.header_widths[level] = left + right + 24.0;
         });
         
     }
@@ -1138,12 +1192,23 @@ impl App {
             let recent = &mut self.settings.recent_searches;
             let history = ui.add_enabled_ui(!recent.is_empty(), |ui| {
                 ui.menu_button(RichText::new("🕘").size(16.0), |ui| {
-                    for q in recent.iter() {
-                        if ui.button(q).clicked() {
-                            again = Some(q.clone());
-                            ui.close();
-                        }
-                    }
+                    // A fixed-size list with the app's scroll bar (Clear history stays below it).
+                    const W: f32 = 420.0;
+                    let rows = recent.len() as f32 * (ui.spacing().interact_size.y + ui.spacing().item_spacing.y);
+                    let height = rows.min(300.0);
+                    ui.allocate_ui(vec2(W, height), |ui| {
+                        ui.set_min_size(vec2(W, height));
+                        crate::fancy_scroll(ui, "recent_searches", |ui| {
+                            let row_w = ui.available_width();
+                            for q in recent.iter() {
+                                let item = egui::Button::new(q.as_str()).frame_when_inactive(false).truncate().min_size(vec2(row_w, 0.0));
+                                if ui.add(item).on_hover_text(q.as_str()).clicked() {
+                                    again = Some(q.clone());
+                                    ui.close();
+                                }
+                            }
+                        });
+                    });
                     ui.separator();
                     if ui.button(t("🗑  Clear history")).clicked() {
                         recent.clear();
@@ -1169,14 +1234,14 @@ impl App {
                     let label = format!("{}  {}", instrument_icon(k as u8), t(name));
                     ui.selectable_value(&mut self.filters.instrument, Some(k as u8), label);
                 }
-            });
+            }).response.on_hover_cursor(CursorIcon::PointingHand);
             let diff_text = difficulty_label(self.filters.difficulty);
             egui::ComboBox::from_id_salt("difficulty").selected_text(diff_text).width(130.0).show_ui(ui, |ui| {
                 ui.selectable_value(&mut self.filters.difficulty, None, difficulty_label(None));
                 for k in 0..DIFFICULTIES.len() as u8 {
                     ui.selectable_value(&mut self.filters.difficulty, Some(k), difficulty_label(Some(k)));
                 }
-            });
+            }).response.on_hover_cursor(CursorIcon::PointingHand);
             if self.filters.instrument == Some(DRUMS) {
                 let dt = self.filters.drum_type.map_or(t("Any Drum Type"), |d| t(DRUM_TYPES[d as usize]));
                 egui::ComboBox::from_id_salt("drumtype").selected_text(dt).width(110.0).show_ui(ui, |ui| {
@@ -1184,7 +1249,7 @@ impl App {
                     for (k, name) in DRUM_TYPES.iter().enumerate() {
                         ui.selectable_value(&mut self.filters.drum_type, Some(k as u8), t(name));
                     }
-                });
+                }).response.on_hover_cursor(CursorIcon::PointingHand);
             }
 
             let n = self.filters.advanced_count();
@@ -1203,13 +1268,22 @@ impl App {
         ui.add_space(4.0);
         crate::theme::hrow(ui, |ui| {
             let f = &mut self.filters;
-            let all = !f.no_video && !f.no_broken && !f.legacy && f.game.is_none() && f.advanced_count() == 0;
+            let all = !f.no_video && !f.no_broken && !f.legacy && f.game.is_none() && f.favourites.is_none() && f.advanced_count() == 0;
             if pill(ui, all, &t("🌈  All songs")).on_hover_text(t("Clear all filters")).clicked() {
                 f.no_video = false;
                 f.no_broken = false;
                 f.legacy = false;
                 f.game = None;
+                f.favourites = None;
                 f.clear_advanced();
+            }
+            // Only favourites (kept up to date as stars are added and removed).
+            let favs = &self.settings.favourites;
+            if f.favourites.as_ref().is_some_and(|shown| shown != favs) {
+                f.favourites = Some(favs.clone());
+            }
+            if pill(ui, f.favourites.is_some(), &tr!("⭐  Favourites ({count})", count = favs.len())).on_hover_text(t("Show only your favourite charts")).clicked() {
+                f.favourites = if f.favourites.is_some() { None } else { Some(favs.clone()) };
             }
             if pill(ui, f.no_video, &t("🎬  No videos")).on_hover_text(t("Hide charts that have a video background")).clicked() {
                 f.no_video = !f.no_video;
@@ -1235,7 +1309,7 @@ impl App {
                 for (g, n) in index.games() {
                     ui.selectable_value(&mut f.game, Some(g.clone()), format!("{}  ({n})", games::game_name(&g)));
                 }
-            });
+            }).response.on_hover_cursor(CursorIcon::PointingHand);
         });
         self.user_searches(ui);
         self.remember_search();
@@ -1306,6 +1380,15 @@ impl App {
             }
         }
         self.settings.column_order = names;
+    }
+
+    /// The year of the oldest modified date in the catalogue (worked out when it changes size).
+    fn oldest_year(&mut self) -> i16 {
+        if self.oldest.0 != self.charts.len() {
+            let year = self.charts.iter().filter_map(|c| c.modified.as_deref()?.get(..4)?.parse::<i16>().ok()).min().unwrap_or(2010);
+            self.oldest = (self.charts.len(), year);
+        }
+        self.oldest.1
     }
 
     /// Where the app is, for Back and Forward: the tab, the search, and the player profile.
@@ -1401,26 +1484,29 @@ impl App {
             return;
         }
         let screen = ctx.content_rect();
-        let width = screen.width();
+        // Inset a little from the window's sides, so both rounded corners show the same.
+        let inset = 8.0;
+        let width = screen.width() - 2.0 * inset;
         let max_height = (screen.bottom() - self.search_bottom - 70.0).max(150.0);
         egui::Area::new(egui::Id::new("advanced_search"))
             .order(egui::Order::Foreground)
-            .fixed_pos(egui::pos2(screen.left(), self.search_bottom))
+            .fixed_pos(egui::pos2(screen.left() + inset, self.search_bottom))
             .show(ctx, |ui| {
                 // An Area's room is last frame's size; let it grow so the cards never get
                 // clipped into a scroll area they don't need.
                 ui.set_max_height(screen.bottom() - self.search_bottom);
                 // Full width, flush under the search bar, like a drop-down sheet.
+                let radius = CornerRadius::ZERO;
                 let frame = egui::Frame::new()
                     .fill(ui.visuals().panel_fill)
-                    .shadow(ui.visuals().popup_shadow)
-                    .corner_radius(CornerRadius { nw: 0, ne: 0, sw: 12, se: 12 })
+                    .shadow(egui::epaint::Shadow { offset: [0, 6], blur: 18, spread: 0, color: Color32::from_black_alpha(90) })
+                    .corner_radius(radius)
                     .inner_margin(egui::Margin::symmetric(16, 12));
-                frame.show(ui, |ui| {
+                let shown = frame.show(ui, |ui| {
                     ui.set_width(width - 32.0);
                     crate::theme::hrow(ui, |ui| {
                         ui.label(RichText::new(t("🎛  Advanced search")).size(17.0).strong().color(theme::accent_hover()));
-                        ui.weak(tr!("{count} results", count = self.results.len()));
+                        ui.weak(trn!(self.results.len(), "{count} result", "{count} results", count = self.results.len()));
                         ui.with_layout(crate::theme::trailing(), |ui| {
                             if ui.button(t("✖  Close")).on_hover_text(t("Esc")).clicked() {
                                 self.show_advanced = false;
@@ -1436,16 +1522,19 @@ impl App {
                         .auto_shrink([false, true])
                         .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded)
                         .show(ui, |ui| {
-                        self.advanced_search(ui);
+                        self.advanced_search(ui, width - 32.0 - 16.0);
                     });
                 });
+                // A border along the bottom, where the panel ends over the results.
+                let r = shown.response.rect;
+                let stroke = egui::Stroke::new(2.0, ui.visuals().widgets.noninteractive.bg_stroke.color.gamma_multiply(1.6));
+                ui.painter().line_segment([r.left_bottom() + vec2(0.0, -1.0), r.right_bottom() + vec2(0.0, -1.0)], stroke);
             });
     }
 
-    fn advanced_search(&mut self, ui: &mut egui::Ui) {
+    fn advanced_search(&mut self, ui: &mut egui::Ui, avail: f32) {
         const GAP: f32 = 10.0;
         const MIN_CARD: f32 = 280.0;
-        let avail = ui.available_width();
         let columns = (((avail + GAP) / (MIN_CARD + GAP)).floor() as usize).clamp(1, 4);
         let card_w = (avail - GAP * (columns - 1) as f32) / columns as f32;
         let mut lookup = false;
@@ -1479,6 +1568,8 @@ impl App {
     /// One advanced-search card, at least `min_height` tall. Returns whether a track hash
     /// lookup was requested, and the height its contents need.
     fn advanced_card(&mut self, ui: &mut egui::Ui, section: Section, width: f32, min_height: f32) -> (bool, f32) {
+        let this_year = jiff::Zoned::now().year();
+        let oldest_year = self.oldest_year().min(this_year);
         let mut lookup = false;
         let track_lookup = self.track_lookup;
         let f = &mut self.filters;
@@ -1489,7 +1580,7 @@ impl App {
             Section::Chart => n("🔑  Chart"),
             Section::Features => n("✨  Features"),
         };
-        let height = egui::Frame::new()
+        let shown = egui::Frame::new()
             .fill(ui.visuals().faint_bg_color)
             .stroke(ui.visuals().widgets.noninteractive.bg_stroke)
             .corner_radius(CornerRadius::same(10))
@@ -1507,12 +1598,26 @@ impl App {
                                 ui.small(t("Exact")).on_hover_text(t("Only include results that match perfectly. (not case sensitive)"));
                                 ui.small(t("Exclude")).on_hover_text(t("Do not include results that match this."));
                                 ui.end_row();
+                                // These fields are the search box's `artist:` (etc.) terms: typing here
+                                // writes them into it, and terms typed there show here.
                                 for (k, label) in TEXT_FIELDS.iter().enumerate() {
-                                    let resp = ui.add_sized([field_w, 24.0], egui::TextEdit::singleline(&mut f.text[k].value).hint_text(t(label)));
-                                    text_menu(&resp, &mut f.text[k].value);
-                                    ui.vertical_centered(|ui| theme::checkbox(ui, &mut f.text[k].exact, ""));
-                                    ui.vertical_centered(|ui| theme::checkbox(ui, &mut f.text[k].exclude, ""));
+                                    let id = egui::Id::new(("adv_text_field", k));
+                                    let field = &mut f.text[k];
+                                    if !ui.memory(|m| m.has_focus(id)) {
+                                        let (value, exact, exclude) = query::field_in_query(&f.query, k);
+                                        if value != field.value.trim() || exact != field.exact || exclude != field.exclude {
+                                            (field.value, field.exact, field.exclude) = (value, exact, exclude);
+                                        }
+                                    }
+                                    let resp = ui.add_sized([field_w, 24.0], egui::TextEdit::singleline(&mut field.value).id(id).hint_text(t(label)));
+                                    let mut changed = text_menu(&resp, &mut field.value) || resp.changed();
+                                    changed |= ui.vertical_centered(|ui| theme::checkbox(ui, &mut field.exact, "").changed()).inner;
+                                    changed |= ui.vertical_centered(|ui| theme::checkbox(ui, &mut field.exclude, "").changed()).inner;
                                     ui.end_row();
+                                    if changed {
+                                        let (value, exact, exclude) = (field.value.trim().to_owned(), field.exact, field.exclude);
+                                        f.query = query::with_field(&f.query, k, &value, exact, exclude);
+                                    }
                                 }
                             });
                         }
@@ -1536,25 +1641,8 @@ impl App {
                             let field_w = inner - 110.0;
                             egui::Grid::new("adv_misc").num_columns(2).spacing([8.0, 5.0]).show(ui, |ui| {
                                 ui.label(t("Modified after")).on_hover_text(t("The date of the last time this chart was modified in Google Drive."));
-                                crate::theme::hrow(ui, |ui| {
-                                    // Type a date, or pick one from the calendar popup.
-                                    let clear_w = if f.modified_after.is_empty() { 0.0 } else { 30.0 };
-                                    let text_w = (field_w - 48.0 - clear_w).max(80.0);
-                                    let resp = ui.add_sized([text_w, 24.0], egui::TextEdit::singleline(&mut f.modified_after).hint_text(t("YYYY-MM-DD")));
-                                    text_menu(&resp, &mut f.modified_after);
-                                    let mut date = f.modified_after.trim().parse::<jiff::civil::Date>().unwrap_or_else(|_| jiff::Zoned::now().date());
-                                    let picker = egui_extras::DatePickerButton::new(&mut date)
-                                        .id_salt("modified_after")
-                                        .format("")
-                                        .show_icon(true)
-                                        .calendar_week(false);
-                                    if ui.add(picker).on_hover_text(t("Pick a date")).changed() {
-                                        f.modified_after = date.to_string();
-                                    }
-                                    if !f.modified_after.is_empty() && ui.small_button("✖").on_hover_text(t("Clear the date")).clicked() {
-                                        f.modified_after.clear();
-                                    }
-                                });
+                                // A calendar, from the year of the oldest chart in the catalogue.
+                                datepicker::date_field(ui, "modified_after", &mut f.modified_after, oldest_year..=this_year, field_w);
                                 ui.end_row();
                                 ui.label(t("Hash")).on_hover_text(t("The MD5 hash of the chart folder or .sng file. You can enter multiple values if they are separated by commas."));
                                 let resp = ui.add_sized([field_w, 24.0], egui::TextEdit::singleline(&mut f.hash).hint_text(t("md5, md5, …")));
@@ -1614,9 +1702,8 @@ impl App {
                 let natural = natural.inner;
                 ui.set_min_height(min_height.max(natural));
                 natural
-            })
-            .inner;
-        (lookup, height)
+            });
+        (lookup, shown.inner)
     }
 
     /// The fixed status bar at the bottom: catalogue progress, rate-limit notices, the log
@@ -1900,7 +1987,7 @@ impl App {
     /// important ones while they don't fit. Name then stretches to fill the rest.
     fn columns(&self, avail: f32) -> Vec<Col> {
         let c = &self.settings.columns;
-        let mut cols = vec![Col::Check];
+        let mut cols = vec![Col::Check, Col::Fav];
         if c.cover {
             cols.push(Col::Cover);
         }
@@ -1924,7 +2011,7 @@ impl App {
         let order = &self.settings.column_order;
         if !order.is_empty() {
             let rank = |c: &Col| order.iter().position(|o| *o == format!("{c:?}")).unwrap_or(usize::MAX);
-            let fixed = cols.iter().take_while(|c| matches!(c, Col::Check | Col::Cover)).count();
+            let fixed = cols.iter().take_while(|c| matches!(c, Col::Check | Col::Fav | Col::Cover)).count();
             cols[fixed..].sort_by_key(rank);
         }
 
@@ -1946,6 +2033,7 @@ impl App {
     fn column_width(&self, col: Col) -> f32 {
         match col {
             Col::Check => 36.0,
+            Col::Fav => 26.0,
             Col::Cover => self.settings.cover_size + 16.0,
             Col::Name => 200.0,
             Col::Artist => 160.0,
@@ -1962,14 +2050,13 @@ impl App {
 
     /// Shows every chart sharing the clicked value. The previous search can be restored with Back.
     fn navigate(&mut self, nav: Nav) {
-        self.history.push(self.filters.clone());
         let mut f = Filters { sort: self.filters.sort, descending: self.filters.descending, ..Default::default() };
         match nav {
-            Nav::Text(k, value, exact) => f.text[k] = filter::TextFilter { value, exact, exclude: false },
+            Nav::Text(k, value, exact) => f.query = query::with_field("", k, &value, exact, false),
             Nav::Album { artist, album } => {
-                f.text[2] = filter::TextFilter { value: album, exact: true, exclude: false };
+                f.query = query::with_field("", 2, &album, true, false);
                 if let Some(artist) = artist {
-                    f.text[1] = filter::TextFilter { value: artist, exact: true, exclude: false };
+                    f.query = query::with_field(&f.query, 1, &artist, true, false);
                 }
             }
             Nav::Game(g) => f.game = Some(g),
@@ -1988,23 +2075,60 @@ impl App {
         self.show_advanced = false;
     }
 
-    /// Removable chips for the active filters, plus Back after a click-through.
+    /// The toast, floating above the status bar for a few seconds (longer while hovered).
+    fn show_toast(&mut self, ctx: &egui::Context) {
+        let Some((text, link, at)) = self.toast.clone() else { return };
+        let screen = ctx.content_rect();
+        let mut close = false;
+        let area = egui::Area::new(egui::Id::new("toast"))
+            .order(egui::Order::Foreground)
+            .pivot(egui::Align2::CENTER_BOTTOM)
+            .fixed_pos(egui::pos2(screen.center().x, screen.bottom() - 70.0))
+            .show(ctx, |ui| {
+                // Amber, so it stands out from the rest of the interface.
+                let amber = Color32::from_rgb(222, 172, 92);
+                let ink = Color32::from_rgb(40, 24, 0);
+                egui::Frame::popup(ui.style())
+                    .fill(amber)
+                    .stroke(egui::Stroke::new(1.0, amber.lerp_to_gamma(Color32::WHITE, 0.3)))
+                    .inner_margin(egui::Margin::symmetric(14, 10))
+                    .show(ui, |ui| {
+                        ui.set_max_width(520.0);
+                        crate::theme::hrow(ui, |ui| {
+                            ui.label(RichText::new("⚠").size(16.0).strong().color(ink));
+                            ui.add(egui::Label::new(RichText::new(text.as_str()).color(ink).strong()).wrap());
+                            if let Some((label, url)) = &link {
+                                let button = egui::Button::new(RichText::new(label.as_str()).color(Color32::WHITE).strong()).fill(Color32::from_rgb(60, 38, 6));
+                                if ui.add(button).on_hover_text(url.as_str()).clicked() {
+                                    ui.ctx().open_url(egui::OpenUrl::new_tab(url));
+                                    close = true;
+                                }
+                            }
+                            let x = egui::Button::new(RichText::new("✖").color(ink)).frame(false);
+                            if ui.add(x).on_hover_text(t("Close")).clicked() {
+                                close = true;
+                            }
+                        });
+                    });
+            });
+        // Gone after 8 seconds, unless the pointer is on it.
+        let hovered = area.response.hovered() || area.response.contains_pointer();
+        if hovered {
+            self.toast = Some((text, link, Instant::now()));
+        } else if close || at.elapsed() > Duration::from_secs(8) {
+            self.toast = None;
+            return;
+        }
+        if close {
+            self.toast = None;
+        }
+        ctx.request_repaint_after(Duration::from_millis(500));
+    }
+
+    /// Removable chips for the active filters.
     fn active_filters(&mut self, ui: &mut egui::Ui) {
         let f = &self.filters;
         let mut chips: Vec<(String, Box<dyn Fn(&mut Filters)>)> = Vec::new();
-        for (k, field) in f.text.iter().enumerate() {
-            if !field.value.trim().is_empty() {
-                let (name, value) = (t(TEXT_FIELDS[k]), field.value.trim());
-                let text = if field.exclude {
-                    tr!("{field} is not \"{value}\"", field = name, value = value)
-                } else if field.exact {
-                    tr!("{field} is \"{value}\"", field = name, value = value)
-                } else {
-                    tr!("{field} contains \"{value}\"", field = name, value = value)
-                };
-                chips.push((text, Box::new(move |f| f.text[k] = Default::default())));
-            }
-        }
         if let Some(i) = f.instrument {
             chips.push((format!("{} {}", instrument_icon(i), t(INSTRUMENTS[i as usize].1)), Box::new(|f| f.instrument = None)));
         }
@@ -2050,23 +2174,11 @@ impl App {
                 f.track_md5s = None;
             })));
         }
-        // Back only makes sense while it leads somewhere different: once every filter is gone
-        // (the full list again), there's nothing to go back to.
-        if chips.is_empty() && self.filters.query.trim().is_empty() {
-            self.history.clear();
-        }
-        while self.history.last() == Some(&self.filters) {
-            self.history.pop();
-        }
-        if chips.is_empty() && self.history.is_empty() {
+        if chips.is_empty() {
             return;
         }
         ui.add_space(4.0);
         crate::theme::hrow_wrapped(ui, |ui| {
-            if !self.history.is_empty() && ui.button(t("← Back")).on_hover_text(t("Go back to the previous search")).clicked() {
-                self.filters = self.history.pop().unwrap_or_default();
-                return;
-            }
             let mut remove = None;
             for (k, (text, _)) in chips.iter().enumerate() {
                 if theme::filter_chip(ui, text, theme::accent_hover(), &t("Remove this filter")) {
@@ -2086,7 +2198,7 @@ impl App {
     fn toolbar_left(&mut self, ui: &mut egui::Ui) {
         let level = self.toolbar_level;
         let count = self.results.len();
-        ui.label(RichText::new(tr!("{count} results", count = count)).strong());
+        ui.label(RichText::new(trn!(count, "{count} result", "{count} results", count = count)).strong());
         if !self.cat_complete && level == 0 {
             if self.live_searching {
                 ui.spinner();
@@ -2162,7 +2274,7 @@ impl App {
             self.request_download(t("Entire Encore library"), charts);
         }
         let all = match level {
-            0 => tr!("⬇ All {count} results", count = count),
+            0 => trn!(count, "⬇ All {count} results", "⬇ All {count} results", count = count),
             1 => t("⬇ All results"),
             _ => t("⬇ All"),
         };
@@ -2263,6 +2375,7 @@ impl App {
         let (charts, results) = (&self.charts, &self.results);
         let covers = &mut self.covers;
         let selected = &self.selected;
+        let favourites = &self.settings.favourites;
         let detail_md5 = self.detail.as_ref().map(|c| c.md5.clone());
         let (sort, desc) = (self.filters.sort, self.filters.descending);
         let instrument = self.filters.instrument;
@@ -2301,7 +2414,7 @@ impl App {
         let last = cols.len() - 1;
         for (k, (&col, &w)) in cols.iter().zip(&widths).enumerate() {
             table = table.column(match col {
-                Col::Check => Column::exact(w).resizable(false),
+                Col::Check | Col::Fav => Column::exact(w).resizable(false),
                 _ if k == last => Column::remainder().at_least(w.min(120.0)).clip(true),
                 // Sized by its own handle (in the header), not the table's.
                 Col::Cover => Column::exact(w).resizable(false),
@@ -2324,7 +2437,7 @@ impl App {
                         continue;
                     }
                     let (title, key) = match col {
-                        Col::Check | Col::Cover => ("", None),
+                        Col::Check | Col::Cover | Col::Fav => ("", None),
                         Col::Tags => (n("Tags"), None),
                         Col::Name => (n("Name"), Some(SortKey::Name)),
                         Col::Artist => (n("Artist"), Some(SortKey::Artist)),
@@ -2358,7 +2471,7 @@ impl App {
                                 cover_active = true;
                             }
                         }
-                        if !matches!(col, Col::Cover) {
+                        if !matches!(col, Col::Cover | Col::Fav) {
                             header_rects.push((*col, cell));
                             // Kept off the edges, which resize the column.
                             let grab = ui.interact(cell.shrink2(vec2(8.0, 0.0)), egui::Id::new(("column_header", *col as u8)), Sense::drag());
@@ -2411,6 +2524,24 @@ impl App {
                                 let mut checked = is_checked;
                                 if theme::select_box(ui, &mut checked, false).changed() {
                                     click = Some(RowClick::Checkbox(i));
+                                }
+                            }
+                            Col::Fav => {
+                                // A star: gold when it's a favourite; click to add or remove it.
+                                let on = favourites.contains(&c.md5);
+                                let (rect, star) = ui.allocate_exact_size(vec2(18.0, 18.0), Sense::click());
+                                let color = if on {
+                                    Color32::from_rgb(240, 190, 40)
+                                } else if star.hovered() {
+                                    ui.visuals().text_color()
+                                } else {
+                                    ui.visuals().weak_text_color().linear_multiply(0.6)
+                                };
+                                ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, if on { "★" } else { "☆" }, egui::FontId::proportional(17.0), color);
+                                star.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Checkbox, true, on, t("Favourite")));
+                                let tip = if on { t("Remove from favourites") } else { t("Add to favourites") };
+                                if star.on_hover_cursor(CursorIcon::PointingHand).on_hover_text(tip).clicked() {
+                                    row_menu = Some(RowAction::Favourite(i));
                                 }
                             }
                             Col::Cover => {
@@ -2482,7 +2613,8 @@ impl App {
                     }
                     let resp = row.response();
                     let have = manifest.contains(&c.md5);
-                    resp.context_menu(|ui| row_context_menu(ui, c, i, is_checked, have, &mut row_menu));
+                    let fav = favourites.contains(&c.md5);
+                    resp.context_menu(|ui| row_context_menu(ui, c, i, is_checked, have, fav, &mut row_menu));
                     // Screen readers announce the row as the song.
                     resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, true, is_checked, c.title()));
                     if resp.hovered() {
@@ -2501,6 +2633,32 @@ impl App {
                 });
             });
         drop(manifest);
+        if self.results.is_empty() && !self.live_searching {
+            let message = egui::Rect::from_center_size(table_rect.center(), vec2(table_rect.width().min(420.0), 160.0));
+            let mut box_ui = ui.new_child(egui::UiBuilder::new().max_rect(message).layout(egui::Layout::top_down(egui::Align::Center)));
+            // Showing favourites with none saved says how to add them.
+            let no_favourites = self.filters.favourites.as_ref().is_some_and(|f| f.is_empty());
+            let (icon, title, hint) = if no_favourites {
+                ("☆", t("You haven't added any favourites yet"), t("Click the ☆ next to a chart, or right-click it, to add it to your favourites."))
+            } else if self.cat_complete {
+                ("🔍", t("No charts found"), t("Try fewer words, or check the spelling and filters."))
+            } else {
+                ("🔍", t("No charts found"), t("The catalogue is still downloading, so more charts may turn up."))
+            };
+            box_ui.label(RichText::new(icon).size(34.0).weak());
+            box_ui.label(RichText::new(title).size(18.0).strong());
+            box_ui.add(egui::Label::new(RichText::new(hint).weak()).wrap());
+            box_ui.add_space(6.0);
+            if no_favourites {
+                if box_ui.button(t("🌈  Show all songs")).clicked() {
+                    self.filters.favourites = None;
+                }
+            } else if box_ui.button(t("✖  Clear search and filters")).clicked() {
+                let f = &mut self.filters;
+                *f = Filters { sort: f.sort, descending: f.descending, ..Filters::default() };
+                self.live_edited = Instant::now();
+            }
+        }
 
         let bar_x = if rtl { full.left() } else { full.right() - theme::SCROLLBAR_W };
         let bar = egui::Rect::from_min_max(egui::pos2(bar_x, scroll.inner_rect.top()), egui::pos2(bar_x + theme::SCROLLBAR_W, scroll.inner_rect.bottom()));
@@ -2567,6 +2725,13 @@ impl App {
             Some(RowAction::Preview(i)) => {
                 let c = self.charts[self.results[i]].clone();
                 self.preview = Some(preview::Preview::open(&self.client, &c, ui.ctx(), self.filters.instrument, self.filters.difficulty));
+            }
+            Some(RowAction::Favourite(i)) => {
+                let md5 = self.charts[self.results[i]].md5.clone();
+                let favs = &mut self.settings.favourites;
+                if !favs.remove(&md5) {
+                    favs.insert(md5);
+                }
             }
             Some(RowAction::Reveal(i)) => {
                 let md5 = self.charts[self.results[i]].md5.clone();
@@ -2678,22 +2843,25 @@ impl App {
             return;
         };
         let downloaded = self.manifest.lock().unwrap().contains(&c.md5);
-        fancy_scroll(ui, "detail", |ui| {
-            ui.add_space(8.0);
-            crate::theme::hrow(ui, |ui| {
-                ui.weak(t("MD5"));
-                // The copy button sits at the right edge; the hash takes what's left and
-                // shortens with "…" if needed (right-click or hover shows it in full).
-                ui.with_layout(crate::theme::trailing(), |ui| {
-                    ui.menu_button("🔗", |ui| copy_link_items(ui, &c.md5)).response.on_hover_text(t("Copy a link to this chart that opens it in Rainbow"));
-                    if ui.small_button("📋").on_hover_text(t("Copy MD5")).clicked() {
-                        ui.ctx().copy_text(c.md5.clone());
-                    }
-                    let hash = ui.add(egui::Label::new(RichText::new(&c.md5).monospace().small()).truncate());
-                    copy_menu(&hash.on_hover_text(&c.md5), &[(n("Copy MD5"), c.md5.clone())]);
-                });
+        // The MD5 stays put at the top; the rest scrolls (from the top again for a new chart).
+        ui.add_space(8.0);
+        crate::theme::hrow(ui, |ui| {
+            ui.weak(t("MD5"));
+            // The copy button sits at the right edge; the hash takes what's left and
+            // shortens with "…" if needed (right-click or hover shows it in full).
+            ui.with_layout(crate::theme::trailing(), |ui| {
+                ui.menu_button("🔗", |ui| copy_link_items(ui, &c.md5)).response.on_hover_text(t("Copy a link to this chart that opens it in Rainbow"));
+                if ui.small_button("📋").on_hover_text(t("Copy MD5")).clicked() {
+                    ui.ctx().copy_text(c.md5.clone());
+                }
+                let hash = ui.add(egui::Label::new(RichText::new(&c.md5).monospace().small()).truncate());
+                copy_menu(&hash.on_hover_text(&c.md5), &[(n("Copy MD5"), c.md5.clone())]);
             });
-            ui.add_space(6.0);
+        });
+        ui.add_space(6.0);
+        let new_chart = self.detail_shown.as_deref() != Some(c.md5.as_str());
+        self.detail_shown = Some(c.md5.clone());
+        fancy_scroll_ex(ui, "detail", new_chart, |ui| {
             let size = ui.available_width().min(320.0);
             let art = ui.vertical_centered(|ui| cover(ui, &mut self.covers, c.art.as_deref(), size, covers::LARGE)).inner;
             // Close button floating in the cover's top-right corner.
@@ -2730,7 +2898,38 @@ impl App {
                     }
                 }
             });
-            ui.add_space(6.0);
+            ui.add_space(10.0);
+            // Download and Preview side by side, half the panel each, right under the title.
+            let (mut download, mut open_preview, mut reveal_it) = (false, false, false);
+            let half = ((ui.available_width() - ui.spacing().item_spacing.x) / 2.0).max(60.0);
+            let busy = self.job.is_some();
+            crate::theme::hrow(ui, |ui| {
+                if downloaded {
+                    let good = theme::good();
+                    let button = egui::Button::new(RichText::new(t("📂  Show in folder")).strong().color(good))
+                        .fill(good.linear_multiply(0.15))
+                        .stroke(egui::Stroke::new(1.0, good.linear_multiply(0.7)))
+                        .min_size(vec2(half, 34.0));
+                    reveal_it = ui.add(button).on_hover_text(t("Downloaded ✔  Open it in your file manager")).clicked();
+                } else {
+                    download = glossy(ui, download_button(&t("⬇  Download")).min_size(vec2(half, 34.0)), theme::good().lerp_to_gamma(Color32::BLACK, 0.2), !busy).clicked();
+                }
+                let preview = egui::Button::new(RichText::new(t("▶  Preview")).size(14.5).strong().color(Color32::WHITE)).min_size(vec2(half, 34.0));
+                open_preview = glossy(ui, preview, Color32::from_rgb(124, 84, 210), true)
+                    .on_hover_text(t("Watch the notes fall, like in game (no audio)"))
+                    .clicked();
+            });
+            if download {
+                self.start_download(c.title(), vec![c.clone()]);
+            }
+            if reveal_it {
+                self.reveal_chart(&c.md5);
+            }
+            if open_preview {
+                self.preview = Some(preview::Preview::open(&self.client, &c, ui.ctx(), self.filters.instrument, self.filters.difficulty));
+            }
+
+            ui.add_space(10.0);
             // One line each: what it is on the left, the value on the right (a link where it
             // leads somewhere).
             // Alternate lines are shaded, like the table.
@@ -2780,37 +2979,6 @@ impl App {
             }
             ui.spacing_mut().item_spacing.y = gap;
 
-            ui.add_space(10.0);
-            // Download and Preview side by side, half the panel each.
-            let (mut download, mut open_preview, mut reveal_it) = (false, false, false);
-            let half = ((ui.available_width() - ui.spacing().item_spacing.x) / 2.0).max(60.0);
-            let busy = self.job.is_some();
-            crate::theme::hrow(ui, |ui| {
-                if downloaded {
-                    let good = theme::good();
-                    let button = egui::Button::new(RichText::new(t("📂  Show in folder")).strong().color(good))
-                        .fill(good.linear_multiply(0.15))
-                        .stroke(egui::Stroke::new(1.0, good.linear_multiply(0.7)))
-                        .min_size(vec2(half, 34.0));
-                    reveal_it = ui.add(button).on_hover_text(t("Downloaded ✔  Open it in your file manager")).clicked();
-                } else {
-                    download = ui.add_enabled(!busy, download_button(&t("⬇  Download")).min_size(vec2(half, 34.0))).clicked();
-                }
-                open_preview = ui
-                    .add(egui::Button::new(RichText::new(t("▶  Preview")).size(14.5).strong().color(Color32::WHITE)).fill(Color32::from_rgb(124, 84, 210)).min_size(vec2(half, 34.0)))
-                    .on_hover_text(t("Watch the notes fall, like in game (no audio)"))
-                    .clicked();
-            });
-            if download {
-                self.start_download(c.title(), vec![c.clone()]);
-            }
-            if reveal_it {
-                self.reveal_chart(&c.md5);
-            }
-            if open_preview {
-                self.preview = Some(preview::Preview::open(&self.client, &c, ui.ctx(), self.filters.instrument, self.filters.difficulty));
-            }
-
             ui.add_space(12.0);
             section(ui, "instruments", &t("Instruments"), None, |ui| {
                 // One full-width band per instrument, alternating shades. Two lines, so the note
@@ -2845,7 +3013,7 @@ impl App {
                                 }
                             });
                             if let Some(s) = notes {
-                                ui.label(RichText::new(tr!("{notes} notes  ·  {nps} max NPS", notes = s.n, nps = format!("{:.0}", s.nps))).size(12.5).weak());
+                                ui.label(RichText::new(trn!(s.n, "{notes} note  ·  {nps} max NPS", "{notes} notes  ·  {nps} max NPS", notes = s.n, nps = format!("{:.0}", s.nps))).size(12.5).weak());
                             }
                         });
                 }
@@ -3183,15 +3351,17 @@ impl App {
 
 /// "Renzora Studios" with the studio's logo in a pill like the header's tabs; links to its
 /// GitHub.
-fn credit(ui: &mut egui::Ui, logo: Option<&egui::TextureHandle>, height: f32) {
+fn credit(ui: &mut egui::Ui, logo: Option<&egui::TextureHandle>, height: f32, compact: bool) {
     // Drawn by hand at its exact size, so it works in the header's right-to-left layout.
+    // Compact (a narrow window): just the logo.
+    let compact = compact && logo.is_some();
     let text = ui.painter().layout_no_wrap(
-        "Renzora Studios".to_owned(),
+        if compact { String::new() } else { "Renzora Studios".to_owned() },
         egui::FontId::new(13.5, egui::FontFamily::Name("bold".into())),
         ui.visuals().text_color(),
     );
     let logo_size = vec2(height * 110.0 / 128.0, height);
-    let (pad_l, gap, pad_r, pad_y) = (6.0, 8.0, 12.0, 3.0);
+    let (pad_l, gap, pad_r, pad_y) = if compact { (6.0, 0.0, 6.0, 3.0) } else { (6.0, 8.0, 12.0, 3.0) };
     let logo_w = if logo.is_some() { logo_size.x + gap } else { 0.0 };
     let size = vec2(pad_l + logo_w + text.size().x + pad_r, height.max(text.size().y) + pad_y * 2.0);
     let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
@@ -3439,6 +3609,9 @@ fn appearance_card(ui: &mut egui::Ui, s: &mut Settings, width: f32) {
                 s.zoom = (s.zoom - 0.1).max(0.5);
             }
         });
+        setting_row(ui, &t("Preview speed"), &t("How playback speeds are shown in the chart preview."), |ui| {
+            segmented(ui, &mut s.speed_percent, &[(false, n("Multiplier (1.5×)")), (true, n("Percent (150%)"))]);
+        });
         setting_row(ui, &t("Row size"), &t("Drag the cover column's edge to fine-tune."), |ui| {
             if segmented(ui, &mut s.density, &[(Density::Compact, n("Compact")), (Density::Default, n("Default")), (Density::Large, n("Large"))]) {
                 s.cover_size = s.density.cover_size();
@@ -3595,20 +3768,54 @@ fn theme_swatch(ui: &mut egui::Ui, kind: theme::ThemeKind, selected: bool) -> eg
 
 /// A vertical scroll area that uses Rainbow's chunky scroll bar instead of egui's.
 pub(crate) fn fancy_scroll<R>(ui: &mut egui::Ui, id: &str, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    fancy_scroll_ex(ui, id, false, add)
+}
+
+/// [`fancy_scroll`], back at the top when `to_top`.
+pub(crate) fn fancy_scroll_ex<R>(ui: &mut egui::Ui, id: &str, to_top: bool, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
     let full = ui.available_rect_before_wrap();
-    // The scroll bar goes on the right, or the left in a right-to-left language.
+    // The scroll bar goes on the right, or the left in a right-to-left language. Its room is
+    // only kept when there's something to scroll (as last frame found), so content that fits
+    // has the same margin on both sides.
     let rtl = i18n::rtl();
-    let area = if rtl { full.with_min_x(full.left() + theme::SCROLLBAR_W + 6.0) } else { full.with_max_x(full.right() - theme::SCROLLBAR_W - 6.0) };
+    let needs_id = ui.id().with(("fancy_scroll_needs_bar", id));
+    let needs_bar = ui.data(|d| d.get_temp::<bool>(needs_id)).unwrap_or(true);
+    let room = if needs_bar { theme::SCROLLBAR_W + 6.0 } else { 0.0 };
+    let area = if rtl { full.with_min_x(full.left() + room) } else { full.with_max_x(full.right() - room) };
     let mut child = ui.new_child(egui::UiBuilder::new().max_rect(area));
-    let out = egui::ScrollArea::vertical()
+    // Content wider than the area (in a narrow panel) is cut off here, not drawn under the bar.
+    child.set_clip_rect(area.intersect(ui.clip_rect()));
+    let mut area = egui::ScrollArea::vertical()
         .id_salt(id)
         .auto_shrink([false, false])
-        .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
-        .show(&mut child, add);
+        .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden);
+    if to_top {
+        area = area.vertical_scroll_offset(0.0);
+    }
+    let out = area.show(&mut child, add);
     let bar_x = if rtl { full.left() } else { full.right() - theme::SCROLLBAR_W };
     let bar = egui::Rect::from_min_max(egui::pos2(bar_x, out.inner_rect.top()), egui::pos2(bar_x + theme::SCROLLBAR_W, out.inner_rect.bottom()));
+    // A solid strip behind the bar, so nothing shows through it.
+    if needs_bar {
+        let strip = if rtl { bar.with_max_x(bar.right() + 6.0) } else { bar.with_min_x(bar.left() - 6.0) };
+        ui.painter().rect_filled(strip, CornerRadius::ZERO, if ui.layer_id().order == egui::Order::Background { ui.visuals().panel_fill } else { ui.visuals().window_fill });
+    }
     let view = out.inner_rect.height();
-    if let Some(offset) = theme::scrollbar(ui, bar, out.id.with("bar"), out.state.offset.y, out.content_size.y, view) {
+    let needed = out.content_size.y > view + 1.0;
+    if needed != needs_bar {
+        ui.data_mut(|d| d.insert_temp(needs_id, needed));
+        ui.ctx().request_repaint();
+    }
+    // When the content gets shorter (e.g. a section is closed at the bottom), pull the scroll
+    // position back so the bar and content still line up.
+    let max_offset = (out.content_size.y - view).max(0.0);
+    if out.state.offset.y > max_offset + 0.5 {
+        let mut state = out.state;
+        state.offset.y = max_offset;
+        state.store(ui.ctx(), out.id);
+        ui.ctx().request_repaint();
+    }
+    if let Some(offset) = theme::scrollbar(ui, bar, out.id.with("bar"), out.state.offset.y.min(max_offset), out.content_size.y, view) {
         let mut state = out.state;
         state.offset.y = offset;
         state.store(ui.ctx(), out.id);
@@ -3636,8 +3843,13 @@ pub(crate) fn section_ex(ui: &mut egui::Ui, id: &str, title: &str, tip: Option<&
         resp = resp.on_hover_text(tip);
     }
     resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::CollapsingHeader, true, title));
+    // Opening a section scrolls its contents into view once they've slid open.
+    let reveal_id = ui.make_persistent_id(("detail_section_reveal", id));
     if resp.clicked() {
         state.toggle(ui);
+        if state.is_open() {
+            ui.data_mut(|d| d.insert_temp(reveal_id, true));
+        }
     }
 
     let accent = theme::accent();
@@ -3674,18 +3886,29 @@ pub(crate) fn section_ex(ui: &mut egui::Ui, id: &str, title: &str, tip: Option<&
     // The header's button, over the header (so a click on it doesn't fold the section).
     let mut clicked = false;
     if let Some(label) = action {
-        let galley = ui.painter().layout_no_wrap(label.to_owned(), egui::FontId::proportional(13.0), text);
-        let size = vec2(galley.size().x + 16.0, 22.0);
-        let x = if rtl { rect.left() + 10.0 + size.x / 2.0 } else { rect.right() - 8.0 - size.x / 2.0 };
+        let font = if label.chars().count() == 1 { 17.0 } else { 13.0 };
+        let galley = ui.painter().layout_no_wrap(label.to_owned(), egui::FontId::proportional(font), text);
+        let size = vec2(galley.size().x + 12.0, rect.height() - 6.0);
+        let x = if rtl { rect.left() + 6.0 + size.x / 2.0 } else { rect.right() - 4.0 - size.x / 2.0 };
         let button = egui::Rect::from_center_size(egui::pos2(x, rect.center().y), size);
         // Plain text that lights up on hover (no button frame), on one line.
-        let link = egui::Button::new(RichText::new(label).size(13.0)).frame(false).wrap_mode(egui::TextWrapMode::Extend);
+        let link = egui::Button::new(RichText::new(label).size(font)).frame(false).wrap_mode(egui::TextWrapMode::Extend);
         clicked = ui.put(button, link).on_hover_cursor(CursorIcon::PointingHand).clicked();
     }
-    state.show_body_unindented(ui, |ui| {
+    let openness = state.openness(ui.ctx());
+    let body = state.show_body_unindented(ui, |ui| {
         ui.add_space(4.0);
         add(ui);
     });
+    if ui.data(|d| d.get_temp::<bool>(reveal_id).unwrap_or(false)) {
+        if let Some(body) = body {
+            // The header and as much of the body as fits; egui scrolls only as far as needed.
+            ui.scroll_to_rect(rect.union(body.response.rect), None);
+        }
+        if openness >= 1.0 {
+            ui.data_mut(|d| d.remove::<bool>(reveal_id));
+        }
+    }
     clicked
 }
 
@@ -3834,27 +4057,69 @@ fn copy_link_items(ui: &mut egui::Ui, md5: &str) {
     }
 }
 
-fn row_context_menu(ui: &mut egui::Ui, c: &Chart, i: usize, checked: bool, downloaded: bool, action: &mut Option<RowAction>) {
-    ui.set_min_width(210.0);
-    let mut pick = |ui: &mut egui::Ui, label: &str, a: RowAction| {
-        // The download line gets the drawn icon rather than the ⬇ character.
-        let button = if label.starts_with('⬇') { icon_button(label, ui.visuals().text_color()) } else { egui::Button::new(label) };
-        if ui.add(button).clicked() {
+/// The menu's line icons (drawn, so they match), by name.
+fn menu_icon(name: &str) -> egui::ImageSource<'static> {
+    match name {
+        "info" => egui::include_image!("../assets/icons/info.svg"),
+        "folder" => egui::include_image!("../assets/icons/folder.svg"),
+        "download" => egui::include_image!("../assets/icons/download.svg"),
+        "play" => egui::include_image!("../assets/icons/play.svg"),
+        "square" => egui::include_image!("../assets/icons/square.svg"),
+        "square-check" => egui::include_image!("../assets/icons/square-check.svg"),
+        "star" => egui::include_image!("../assets/icons/star.svg"),
+        "star-off" => egui::include_image!("../assets/icons/star-off.svg"),
+        "link" => egui::include_image!("../assets/icons/link.svg"),
+        "copy" => egui::include_image!("../assets/icons/copy.svg"),
+        "user" => egui::include_image!("../assets/icons/user.svg"),
+        _ => egui::include_image!("../assets/icons/pencil.svg"),
+    }
+}
+
+/// Text without its leading emoji (the translations have one; menus draw an icon instead).
+fn without_icon(text: &str) -> String {
+    // The icon is a symbol or two before a double space ("ℹ  Show details").
+    match text.split_once("  ") {
+        Some((first, rest)) if first.chars().count() <= 2 => rest.trim_start().to_owned(),
+        _ => text.to_owned(),
+    }
+}
+
+/// A menu item: a line icon and the text.
+fn menu_item(ui: &egui::Ui, icon: &str, text: &str) -> egui::Button<'static> {
+    let image = egui::Image::new(menu_icon(icon)).fit_to_exact_size(vec2(15.0, 15.0)).tint(ui.visuals().text_color());
+    egui::Button::image_and_text(image, without_icon(text))
+}
+
+fn row_context_menu(ui: &mut egui::Ui, c: &Chart, i: usize, checked: bool, downloaded: bool, favourite: bool, action: &mut Option<RowAction>) {
+    ui.set_min_width(220.0);
+    ui.spacing_mut().icon_spacing = 10.0;
+    let mut pick = |ui: &mut egui::Ui, icon: &str, label: &str, a: RowAction| {
+        if ui.add(menu_item(ui, icon, label)).clicked() {
             *action = Some(a);
             ui.close();
         }
     };
-    pick(ui, &t("ℹ  Show details"), RowAction::Details(i));
+    pick(ui, "info", &t("ℹ  Show details"), RowAction::Details(i));
     if downloaded {
-        pick(ui, &t("📂  Show in folder"), RowAction::Reveal(i));
+        pick(ui, "folder", &t("📂  Show in folder"), RowAction::Reveal(i));
     } else {
-        pick(ui, &t("⬇  Download"), RowAction::Download(i));
+        pick(ui, "download", &t("⬇  Download"), RowAction::Download(i));
     }
-    pick(ui, &t("▶  Preview"), RowAction::Preview(i));
-    pick(ui, &if checked { t("☐  Deselect") } else { t("☑  Select") }, RowAction::Toggle(i));
-    ui.menu_button(t("🔗  Copy link"), |ui| copy_link_items(ui, &c.md5));
+    pick(ui, "play", &t("▶  Preview"), RowAction::Preview(i));
+    if checked {
+        pick(ui, "square", &t("☐  Deselect"), RowAction::Toggle(i));
+    } else {
+        pick(ui, "square-check", &t("☑  Select"), RowAction::Toggle(i));
+    }
+    if favourite {
+        pick(ui, "star-off", &t("☆  Remove from favourites"), RowAction::Favourite(i));
+    } else {
+        pick(ui, "star", &t("⭐  Add to favourites"), RowAction::Favourite(i));
+    }
+    // Submenus show a caret.
+    egui::containers::menu::SubMenuButton::from_button(menu_item(ui, "link", &t("🔗  Copy link")).right_text("⏵")).ui(ui, |ui| copy_link_items(ui, &c.md5));
     ui.separator();
-    ui.menu_button(t("📋  Copy"), |ui| {
+    egui::containers::menu::SubMenuButton::from_button(menu_item(ui, "copy", &t("📋  Copy")).right_text("⏵")).ui(ui, |ui| {
         let mut items = vec![(n("\"Artist - Song (Charter)\""), c.title())];
         for (label, value) in [(n("Song name"), &c.name), (n("Artist"), &c.artist), (n("Album"), &c.album), (n("Charter"), &c.charter)] {
             if let Some(v) = value {
@@ -3870,10 +4135,10 @@ fn row_context_menu(ui: &mut egui::Ui, c: &Chart, i: usize, checked: bool, downl
         }
     });
     if let Some(a) = &c.artist {
-        pick(ui, &t("🔍  More by this artist"), RowAction::Nav(Nav::Text(1, a.clone(), true)));
+        pick(ui, "user", &t("🔍  More by this artist"), RowAction::Nav(Nav::Text(1, a.clone(), true)));
     }
     if let Some(ch) = &c.charter {
-        pick(ui, &t("🔍  More by this charter"), RowAction::Nav(Nav::Text(5, ch.clone(), false)));
+        pick(ui, "pencil", &t("🔍  More by this charter"), RowAction::Nav(Nav::Text(5, ch.clone(), false)));
     }
 }
 
@@ -3978,6 +4243,27 @@ fn column_gap(headers: &[(Col, egui::Rect)], x: f32) -> Option<f32> {
 /// last level if none fits.
 fn pick_level(widths: &[f32], width: f32) -> usize {
     widths.iter().position(|&w| w == 0.0 || w <= width).unwrap_or(widths.len() - 1)
+}
+
+/// A button in `base` with a top-to-bottom gradient and a small soft shadow under it, painted
+/// behind the button (whose own fill is cleared).
+fn glossy(ui: &mut egui::Ui, button: egui::Button, base: Color32, enabled: bool) -> egui::Response {
+    let behind = ui.painter().add(egui::Shape::Noop);
+    let resp = ui.add_enabled(enabled, button.fill(Color32::TRANSPARENT).stroke(egui::Stroke::NONE));
+    let r = resp.rect;
+    let radius = ui.visuals().widgets.inactive.corner_radius;
+    let base = if !enabled {
+        base.gamma_multiply(0.45)
+    } else if resp.hovered() {
+        base.lerp_to_gamma(Color32::WHITE, 0.12)
+    } else {
+        base
+    };
+    let shadow = egui::epaint::Shadow { offset: [0, 2], blur: 6, spread: 0, color: Color32::from_black_alpha(if enabled { 90 } else { 30 }) };
+    let top = base.lerp_to_gamma(Color32::WHITE, 0.16);
+    let bottom = base.lerp_to_gamma(Color32::BLACK, 0.14);
+    ui.painter().set(behind, egui::Shape::Vec(vec![shadow.as_shape(r, radius).into(), theme::vertical_gradient(r, radius.nw as f32, top, bottom)]));
+    resp
 }
 
 /// The download icon (an arrow into a tray), drawn rather than the boxy ⬇ character.
@@ -4232,7 +4518,7 @@ fn duration_words(secs: f64) -> String {
         0..60 => tr!("{n} s", n = s),
         60..3600 => tr!("{n} min", n = s.div_ceil(60)),
         3600..86400 => tr!("{h} h {m} min", h = s / 3600, m = s % 3600 / 60),
-        _ => tr!("{d} days {h} h", d = s / 86400, h = s % 86400 / 3600),
+        _ => trn!(s / 86400, "{d} day {h} h", "{d} days {h} h", d = s / 86400, h = s % 86400 / 3600),
     }
 }
 
@@ -4378,24 +4664,13 @@ impl eframe::App for App {
                     // so a chip appearing as you set a filter doesn't push the panel down.
                     self.search_bottom = ui.min_rect().bottom() + 4.0;
                     self.active_filters(ui);
-                    ui.add_space(8.0);
+                    // The same gap below as above (the row spacing already adds some).
+                    ui.add_space((8.0 - ui.spacing().item_spacing.y).max(0.0));
                 });
                 if self.detail.is_some() {
-                    // Give the panel's resize line the same look as the table's column bars.
-                    let normal = ui.style().clone();
-                    let w = &mut ui.visuals_mut().widgets;
-                    w.noninteractive.bg_stroke.width = 3.0;
-                    w.hovered.fg_stroke = w.hovered.bg_stroke;
-                    w.hovered.fg_stroke.width = 4.0;
-                    w.active.fg_stroke = w.active.bg_stroke;
-                    w.active.fg_stroke.width = 4.0;
-                    ui.style_mut().interaction.resize_grab_radius_side = 7.0;
+                    // A fixed width (no resize handle).
                     let side = if i18n::rtl() { egui::Panel::left("detail") } else { egui::Panel::right("detail") };
-                    side.resizable(true).default_size(310.0).size_range(260.0..=640.0).show(ui, |ui| {
-                        ui.set_style(normal.clone());
-                        self.detail_panel(ui);
-                    });
-                    ui.set_style(normal);
+                    side.resizable(false).exact_size(350.0).show(ui, |ui| self.detail_panel(ui));
                 }
                 self.live_search();
                 self.refresh_results();
@@ -4426,6 +4701,10 @@ impl eframe::App for App {
             ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
             ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
         }
+        if let Some((text, link)) = ctx.data_mut(|d| d.remove_temp::<(String, Option<(String, String)>)>(players::toast_id())) {
+            self.toast = Some((text, link, Instant::now()));
+        }
+        self.show_toast(&ctx);
         if let Some(q) = ctx.data_mut(|d| d.remove_temp::<String>(players::search_request_id())) {
             // A fresh search: just this text, every other filter cleared (the order stays). A
             // chart's MD5 (New on Encore) also opens its details, like a shared link.
@@ -4434,6 +4713,9 @@ impl eframe::App for App {
             } else {
                 let f = &mut self.filters;
                 *f = Filters { query: q, sort: f.sort, descending: f.descending, ..Filters::default() };
+                // A song found from Players or Leaderboards opens in the details panel (the top
+                // result if there are several).
+                self.open_first = true;
             }
             self.tab = Tab::Browse;
             self.live_edited = Instant::now();
@@ -4444,6 +4726,7 @@ impl eframe::App for App {
             self.tab = Tab::Players;
         }
         self.players.set_density(self.settings.density);
+        preview::SPEED_PERCENT.store(self.settings.speed_percent, Ordering::Relaxed);
         self.updates.poll(&ctx, self.settings.auto_update);
         if self.modal_backdrop(&ctx) {
             self.updates.dialog(&ctx);
@@ -4525,7 +4808,7 @@ fn ago(unix: u64) -> String {
         s if s < 90 => t("just now"),
         s if s < 90 * 60 => tr!("{n} min ago", n = s / 60),
         s if s < 36 * 3600 => tr!("{n} h ago", n = s / 3600),
-        s => tr!("{n} days ago", n = s / 86400),
+        s => trn!(s / 86400, "{n} day ago", "{n} days ago", n = s / 86400),
     }
 }
 

@@ -1,6 +1,6 @@
 [package]
 name = "rainbow"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 description = "Search and download Clone Hero charts from Chorus Encore"
 license = "MIT OR Apache-2.0"

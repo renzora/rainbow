@@ -33,6 +33,7 @@ struct File {
 /// Built-in languages: (code, file contents).
 const BUILT_IN: &[(&str, &str)] = &[
     ("ar", include_str!("../assets/lang/ar.json")),
+    ("en-US", include_str!("../assets/lang/en-US.json")),
     ("es", include_str!("../assets/lang/es.json")),
     ("pt-BR", include_str!("../assets/lang/pt-BR.json")),
     ("fr", include_str!("../assets/lang/fr.json")),
@@ -182,7 +183,8 @@ fn all_files() -> Vec<(String, File)> {
 }
 
 pub fn languages() -> Vec<Language> {
-    let mut out = vec![Language { code: "en".into(), name: "English".into(), english_name: "English".into() }];
+    // The interface is written in British English; US English is a translation (en-US.json).
+    let mut out = vec![Language { code: "en".into(), name: "English (UK)".into(), english_name: "English (UK)".into() }];
     let mut rest: Vec<Language> = all_files()
         .into_iter()
         .map(|(code, f)| Language { english_name: if f.english_name.is_empty() { f.name.clone() } else { f.english_name }, name: visual(&f.name), code })
@@ -238,6 +240,16 @@ macro_rules! tr {
         let mut s = $crate::i18n::t($text);
         $( s = s.replace(concat!("{", stringify!($key), "}"), &$crate::i18n::Shown::shown(&$value)); )*
         s
+    }};
+}
+
+/// Like `tr!`, with a singular text for a count of one: `trn!(n, "{count} result",
+/// "{count} results", count = n)`. (Each language translates both; ones with more plural
+/// forms word the texts to suit.)
+#[macro_export]
+macro_rules! trn {
+    ($n:expr, $one:literal, $other:literal $(, $key:ident = $value:expr)* $(,)?) => {{
+        if ($n) as u64 == 1 { $crate::tr!($one $(, $key = $value)*) } else { $crate::tr!($other $(, $key = $value)*) }
     }};
 }
 

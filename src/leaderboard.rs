@@ -93,6 +93,8 @@ pub struct Panel {
     /// Leaderboard instrument id (scan-chart's, plus "prodrums") and difficulty.
     instrument: &'static str,
     difficulty: &'static str,
+    /// The header's Refresh was clicked: fetch the shown board again.
+    refresh: bool,
 }
 
 impl Panel {
@@ -103,13 +105,17 @@ impl Panel {
             .timeout(Duration::from_secs(60))
             .build()
             .unwrap_or_default();
-        Self { http, md5: String::new(), hashes: HashMap::new(), boards: HashMap::new(), instrument: "guitar", difficulty: "expert" }
+        Self { http, md5: String::new(), hashes: HashMap::new(), boards: HashMap::new(), instrument: "guitar", difficulty: "expert", refresh: false }
     }
 
     /// Shows the leaderboard section for `c`, starting on the instrument and difficulty being
     /// searched for when the chart has them. Nothing is downloaded while it's collapsed.
     pub fn show(&mut self, ui: &mut egui::Ui, c: &Chart, instrument: Option<u8>, difficulty: Option<u8>) {
-        crate::section(ui, "leaderboard", &t("🏆  Clone Hero Leaderboard"), None, |ui| self.contents(ui, c, instrument, difficulty));
+        // Refresh sits at the far end of the section's header.
+        let refresh = "↻".to_owned();
+        if crate::section_ex(ui, "leaderboard", &t("🏆  Clone Hero Leaderboard"), None, Some(&refresh), |ui| self.contents(ui, c, instrument, difficulty)) {
+            self.refresh = true;
+        }
     }
 
     pub(crate) fn contents(&mut self, ui: &mut egui::Ui, c: &Chart, instrument: Option<u8>, difficulty: Option<u8>) {
@@ -191,7 +197,7 @@ impl Panel {
             }
             Load::Ready(b) => refresh = show_board(ui, b, self.instrument, self.difficulty),
         }
-        if refresh {
+        if refresh || std::mem::take(&mut self.refresh) {
             self.boards.remove(&key);
         }
     }
@@ -207,7 +213,9 @@ fn loading(ui: &mut egui::Ui, text: &str) {
 /// Draws the scores; returns true if Refresh was clicked.
 fn show_board(ui: &mut egui::Ui, b: &Board, instrument: &str, difficulty: &str) -> bool {
     if b.entries.is_empty() {
-        ui.weak(t("No scores yet. Be the first!"));
+        ui.add_space(12.0);
+        ui.vertical_centered(|ui| ui.weak(t("No scores yet. Be the first!")));
+        ui.add_space(12.0);
     }
     ui.spacing_mut().item_spacing.y = 2.0;
     for (row, e) in b.entries.iter().enumerate() {
@@ -258,7 +266,7 @@ fn show_board(ui: &mut egui::Ui, b: &Board, instrument: &str, difficulty: &str) 
                         if e.pfc && instrument != "drums" && instrument != "prodrums" {
                             theme::tag(ui, "👑 PFC", theme::warn());
                         } else if e.fc {
-                            theme::tag(ui, "FC", theme::good());
+                            theme::tag(ui, "👑 FC", theme::good());
                         }
                     });
                 });
@@ -272,11 +280,14 @@ fn show_board(ui: &mut egui::Ui, b: &Board, instrument: &str, difficulty: &str) 
         }
     }
     ui.spacing_mut().item_spacing.y = 6.0;
-    let mut refresh = false;
-    crate::theme::hrow_wrapped(ui, |ui| {
-        ui.weak(tr!("{players} players  ·  {plays} plays", players = b.players, plays = b.plays));
-        refresh = ui.small_button("↻").on_hover_text(t("Refresh the scores")).clicked();
+    ui.add_space(4.0);
+    ui.horizontal(|ui| {
+        ui.add_space(8.0);
+        let players = crate::trn!(b.players, "{count} player", "{count} players", count = b.players);
+        let plays = crate::trn!(b.plays, "{count} play", "{count} plays", count = b.plays);
+        ui.weak(format!("{players}  ·  {plays}"));
     });
+    ui.add_space(4.0);
     if let Some(song) = &b.song_hash {
         let url = format!("{SITE_URL}/scores/{song}?instrument={instrument}&difficulty={difficulty}");
         let link = ui.add(egui::Button::new(RichText::new(t("View the full leaderboard ↗")).color(ui.visuals().hyperlink_color)).frame(false));
@@ -284,7 +295,7 @@ fn show_board(ui: &mut egui::Ui, b: &Board, instrument: &str, difficulty: &str) 
             ui.ctx().open_url(egui::OpenUrl::new_tab(url));
         }
     }
-    refresh
+    false
 }
 
 /// Leaderboard instruments the chart has, in Rainbow's instrument order. Drums has two:

@@ -26,7 +26,19 @@ const BLUE: Color32 = Color32::from_rgb(50, 120, 235);
 const ORANGE: Color32 = Color32::from_rgb(245, 135, 30);
 const PURPLE: Color32 = Color32::from_rgb(175, 80, 225);
 const STAR: Color32 = Color32::from_rgb(130, 235, 255);
-const SPEEDS: [f32; 7] = [0.1, 0.25, 0.5, 0.75, 1.0, 1.25, 1.5];
+const SPEEDS: [f32; 11] = [0.1, 0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0];
+
+/// Speeds are shown as percentages ("150%") rather than "1.5×" (the Speed display setting).
+pub static SPEED_PERCENT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// A playback speed as the settings say to show it.
+pub fn speed_text(speed: f32) -> String {
+    if SPEED_PERCENT.load(std::sync::atomic::Ordering::Relaxed) {
+        format!("{:.0}%", speed * 100.0)
+    } else {
+        format!("{speed}×")
+    }
+}
 /// How far past the strike line notes stay visible, as a fraction of the highway.
 const BEHIND: f32 = 0.12;
 
@@ -54,6 +66,8 @@ pub struct Preview {
     md5: String,
     /// How far the chart download has got (0 to 1000).
     load_progress: Arc<AtomicU32>,
+    /// Keyboard focus was taken from the app behind when the preview opened.
+    took_focus: bool,
     /// The Close button was clicked (it's in the controls, away from the app window's own ✖).
     closing: bool,
     state: State,
@@ -124,6 +138,7 @@ impl Preview {
             path_charts: HashMap::new(),
             save_status: None,
             closing: false,
+            took_focus: false,
             titles: (
                 c.name.clone().unwrap_or_else(|| t("Unknown")),
                 c.artist.clone().unwrap_or_else(|| t("Unknown Artist")),
@@ -181,6 +196,15 @@ impl Preview {
                 }
                 Err(e) => State::Failed(e),
             };
+        }
+        // The preview takes the keyboard (e.g. from the search box behind it) when it opens.
+        if !self.took_focus {
+            self.took_focus = true;
+            ctx.memory_mut(|m| {
+                if let Some(id) = m.focused() {
+                    m.surrender_focus(id);
+                }
+            });
         }
         let screen = ctx.content_rect();
         let window = egui::Window::new(RichText::new(format!("▶  {}", self.title)).strong())
@@ -260,9 +284,7 @@ impl Preview {
             ui.ctx().request_repaint();
         }
         self.last_frame = Some(now);
-        if !ui.ctx().egui_wants_keyboard_input() && ui.input(|i| i.key_pressed(egui::Key::Space)) {
-            self.toggle(song.end);
-        }
+        self.keys(ui.ctx(), song);
 
         // Top: instrument and difficulty pickers (only what this chart has) and the optimal score,
         // centred on a background.
@@ -288,7 +310,7 @@ impl Preview {
             });
             if let Some(t) = song.track(self.inst, self.diff) {
                 let gems = t.notes.iter().filter(|n| !matches!(n.kind, Kind::DoubleKick)).count();
-                ui.weak(crate::tr!("{count} notes", count = gems));
+                ui.weak(crate::trn!(gems, "{count} note", "{count} notes", count = gems));
             }
             ui.separator();
             ui.selectable_value(&mut self.path_view, false, t("🎸 Highway"));
@@ -369,6 +391,16 @@ impl Preview {
             let board = egui::Rect::from_min_max(egui::pos2(full.right() - board_w, full.top()), full.max);
             (egui::Rect::from_min_max(full.min, egui::pos2(full.right() - board_w - gap, full.bottom())), board)
         };
+        // The section list gets its own column at the start, so the highway is centred in
+        // what's left (between the sections and the leaderboard).
+        let sections_w = if song.sections.is_empty() { 0.0 } else { (rect.width() * 0.26).clamp(120.0, 200.0) };
+        let (rect, sections_rect) = if crate::i18n::rtl() {
+            let list = egui::Rect::from_min_max(egui::pos2(rect.right() - sections_w, rect.top()), rect.max);
+            (egui::Rect::from_min_max(rect.min, egui::pos2(rect.right() - sections_w - 8.0, rect.bottom())), list)
+        } else {
+            let list = egui::Rect::from_min_size(rect.min, vec2(sections_w, rect.height()));
+            (egui::Rect::from_min_max(egui::pos2(rect.left() + sections_w + 8.0, rect.top()), rect.max), list)
+        };
         let resp = ui.interact(rect, ui.id().with("highway"), Sense::click());
         if resp.clicked() {
             self.toggle(song.end);
@@ -395,8 +427,7 @@ impl Preview {
         // space in the layout): the current one highlighted, click one to jump there.
         if !song.sections.is_empty() {
             let current = song.sections.iter().rposition(|s| s.0 <= self.time + 0.05);
-            let width = (rect.width() * 0.26).clamp(120.0, 200.0);
-            let area = egui::Rect::from_min_size(rect.min + vec2(8.0, 8.0), vec2(width, rect.height() - 16.0));
+            let area = sections_rect.shrink2(vec2(0.0, 8.0));
             let mut list = ui.new_child(egui::UiBuilder::new().max_rect(area).layout(egui::Layout::top_down(egui::Align::Min)));
             list.set_clip_rect(area);
             egui::ScrollArea::vertical().id_salt("preview_sections").max_height(area.height()).auto_shrink([false, true]).show(&mut list, |ui| {
@@ -407,7 +438,7 @@ impl Preview {
                     let text = if on { text.strong().color(Color32::WHITE) } else { text.color(Color32::from_gray(170)) };
                     let button = egui::Button::new(text)
                         .fill(if on { crate::theme::accent().linear_multiply(0.85) } else { Color32::from_black_alpha(140) })
-                        .min_size(vec2(width - 12.0, 22.0));
+                        .min_size(vec2(ui.available_width() - 4.0, 22.0));
                     let resp = ui.add(button).on_hover_text(crate::tr!("Jump to {time}", time = clock(*secs)));
                     // Bring a new current section into view once (not every frame, which shakes).
                     if on && self.shown_section != current {
@@ -448,7 +479,7 @@ impl Preview {
                         egui::Button::new(RichText::new(icon).size(16.0))
                             .min_size(vec2(36.0, 28.0)),
                     )
-                    .on_hover_text(t("Play/pause (Space)"))
+                    .on_hover_text(t("Play/pause (Space). ←/→ skip 5 s, ↑/↓ speed, R repeat, PgUp/PgDn sections"))
                     .clicked()
                 {
                     self.toggle(song.end);
@@ -473,11 +504,11 @@ impl Preview {
                         self.window = 3.2 / note_speed;
                     }
                     egui::ComboBox::from_id_salt("preview_speed")
-                        .selected_text(format!("{}×", self.speed))
+                        .selected_text(speed_text(self.speed))
                         .width(64.0)
                         .show_ui(ui, |ui| {
                             for s in SPEEDS {
-                                ui.selectable_value(&mut self.speed, s, format!("{s}×"));
+                                ui.selectable_value(&mut self.speed, s, speed_text(s));
                             }
                         })
                         .response
@@ -635,8 +666,57 @@ impl Preview {
                     }
                     None => {}
                 }
+                ui.separator();
+                let close = ui.add(egui::Button::new(t("✖  Close")).min_size(vec2(0.0, 28.0)));
+                self.closing |= close.on_hover_text(t("Close the preview (Esc)")).clicked();
             });
         });
+    }
+
+    /// The player's keyboard shortcuts: Space play/pause, ←/→ back/forward 5 s, ↑/↓ faster/
+    /// slower, R repeat the section, PgUp/PgDn previous/next section, Esc close.
+    fn keys(&mut self, ctx: &egui::Context, song: &Song) {
+        use egui::Key;
+        // Typing in a box elsewhere in the preview keeps its keys.
+        if ctx.egui_wants_keyboard_input() {
+            return;
+        }
+        let pressed = |k: Key| ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, k));
+        if pressed(Key::Space) {
+            self.toggle(song.end);
+        }
+        if pressed(Key::ArrowLeft) {
+            self.time = (self.time - 5.0).max(-1.0);
+        }
+        if pressed(Key::ArrowRight) {
+            self.time = (self.time + 5.0).min(song.end);
+        }
+        let at = SPEEDS.iter().position(|&s| (s - self.speed).abs() < 1e-3).unwrap_or(4);
+        if pressed(Key::ArrowUp) {
+            self.speed = SPEEDS[(at + 1).min(SPEEDS.len() - 1)];
+        }
+        if pressed(Key::ArrowDown) {
+            self.speed = SPEEDS[at.saturating_sub(1)];
+        }
+        let current = song.sections.iter().rposition(|s| s.0 <= self.time + 0.05);
+        if pressed(Key::R) && !song.sections.is_empty() {
+            self.repeat = if self.repeat.is_some() { None } else { current.or(Some(0)) };
+        }
+        if pressed(Key::PageDown)
+            && let Some(&(t, _)) = song.sections.get(current.map_or(0, |k| k + 1))
+        {
+            self.time = t;
+        }
+        if pressed(Key::PageUp)
+            && let Some(k) = current
+        {
+            // To the start of this section, or the one before if already at its start.
+            let k = if self.time - song.sections[k].0 < 1.0 { k.saturating_sub(1) } else { k };
+            self.time = song.sections[k].0;
+        }
+        if pressed(Key::Escape) {
+            self.closing = true;
+        }
     }
 
     fn toggle(&mut self, end: f32) {

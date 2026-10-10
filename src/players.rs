@@ -34,6 +34,23 @@ pub fn open_profile_id() -> egui::Id {
     egui::Id::new("rainbow_open_player")
 }
 
+/// Asks the app to show a short message (a toast), with an optional link button (label, URL).
+pub fn toast_id() -> egui::Id {
+    egui::Id::new("rainbow_toast")
+}
+
+fn request_toast(ctx: &egui::Context, text: String, link: Option<(String, String)>) {
+    ctx.data_mut(|d| d.insert_temp(toast_id(), (text, link)));
+}
+
+/// Says a song isn't on Encore, with a button to look for the chart on the web.
+fn not_on_encore(ctx: &egui::Context, name: &str, artist: &str, charter: &str) {
+    let song = format!("{artist} - {name}");
+    let search = format!("{artist} {name} {charter} clone hero chart");
+    let url = format!("https://www.google.com/search?q={}", encode(search.trim()));
+    request_toast(ctx, tr!("{song} isn't on Chorus Encore, so it can't be downloaded here", song = song), Some((t("🔍  Search the web"), url)));
+}
+
 /// Asks the app to search the catalogue for this text.
 pub fn search_request_id() -> egui::Id {
     egui::Id::new("rainbow_search_request")
@@ -483,15 +500,18 @@ fn fetch_played(http: &Client, name: &str) -> Result<Played> {
 /// Album art for songs and artists by (lower-case) name, from the catalogue, so lists of
 /// played songs can show covers: (catalogue size it was built from, by (name, artist), by artist).
 #[derive(Default)]
-struct Art(usize, HashMap<(String, String), String>, HashMap<String, String>);
+struct Art(usize, HashMap<(String, String), String>, HashMap<String, String>, std::collections::HashSet<(String, String)>);
 
 impl Art {
     fn update(&mut self, charts: &[crate::api::Chart]) {
         if self.0 == charts.len() {
             return;
         }
-        let (mut songs, mut artists) = (HashMap::new(), HashMap::new());
+        let (mut songs, mut artists, mut known) = (HashMap::new(), HashMap::new(), std::collections::HashSet::new());
         for c in charts {
+            if let (Some(name), Some(artist)) = (&c.name, &c.artist) {
+                known.insert((name.to_lowercase(), artist.to_lowercase()));
+            }
             let (Some(art), Some(artist)) = (&c.art, &c.artist) else { continue };
             let artist = artist.to_lowercase();
             if let Some(name) = &c.name {
@@ -499,7 +519,12 @@ impl Art {
             }
             artists.entry(artist).or_insert_with(|| art.clone());
         }
-        *self = Art(charts.len(), songs, artists);
+        *self = Art(charts.len(), songs, artists, known);
+    }
+
+    /// Whether Encore has a chart of this song (any charter).
+    fn has_song(&self, name: &str, artist: &str) -> bool {
+        self.3.contains(&(name.to_lowercase(), artist.to_lowercase()))
     }
 
     fn song(&self, name: &str, artist: &str) -> Option<&str> {
@@ -738,8 +763,11 @@ impl Players {
         self.art.update(charts);
         let ctx = ui.ctx().clone();
         let z = self.sizes;
+        // A thick resize line in the theme's colours, like the others.
+        let normal = crate::theme::thick_resize_bars(ui);
         let side = if crate::i18n::rtl() { egui::Panel::right("player_search") } else { egui::Panel::left("player_search") };
         side.resizable(true).default_size(290.0).size_range(230.0..=440.0).show(ui, |ui| {
+            ui.set_style(normal.clone());
             crate::fancy_scroll(ui, "players_side", |ui| {
                 ui.add_space(8.0);
                 if let Some(f) = self.find.show(ui, &self.http.clone(), &t("🔍  Find a player…"), z, &[]) {
@@ -814,6 +842,7 @@ impl Players {
                 }
             });
         });
+        ui.set_style(normal);
 
         let mut back_to_tab = false;
         egui::CentralPanel::default_margins().show(ui, |ui| {
@@ -930,7 +959,11 @@ impl Players {
                                     });
                                 });
                                 if resp.on_hover_text(t("Search for this song")).clicked() {
-                                    request_search(ui.ctx(), &song_query(&r.name, &r.artist, None));
+                                    if me.art.has_song(&r.name, &r.artist) {
+                                        request_search(ui.ctx(), &song_query(&r.name, &r.artist, None));
+                                    } else {
+                                        not_on_encore(ui.ctx(), &r.name, &r.artist, "");
+                                    }
                                 }
                             }
                         });
@@ -994,6 +1027,10 @@ impl Players {
                                     placement: None,
                                     detail: None,
                                     art: me.art.song(&r.name, &r.artist),
+                                    on_encore: me.art.has_song(&r.name, &r.artist),
+                                    name: &r.name,
+                                    artist: &r.artist,
+                                    charter: &r.charter,
                                 };
                                 let (resp, find) = score_row(ui, k, z, &line, None, covers);
                                 if find {
@@ -1016,6 +1053,8 @@ impl Players {
                 });
             } else {
                 body(ui, 0, self, covers, &mut open);
+                // The same gap between the two columns' sections as within them.
+                ui.add_space(8.0);
                 body(ui, 1, self, covers, &mut open);
             }
         });
@@ -1117,12 +1156,19 @@ fn profile_view(ui: &mut egui::Ui, http: &Client, w: &mut Window, others: &mut [
                         "{}  ·  {}  ·  {}",
                         tr!("Max combo {combo}", combo = thousands(s.max_combo)),
                         tr!("Star power {hit}/{count}", hit = s.sp_hit, count = s.sp_count),
-                        tr!("{count} squeezes", count = s.squeezes)
+                        crate::trn!(s.squeezes, "{count} squeeze", "{count} squeezes", count = s.squeezes)
                     )),
                     art: art.song(&s.name, &s.artist),
+                    on_encore: art.has_song(&s.name, &s.artist),
+                    name: &s.name,
+                    artist: &s.artist,
+                    charter: &s.charter,
                 };
                 let (resp, find) = score_row(ui, k, z, &line, Some(&s.parts), covers);
-                if find || resp.on_hover_text(t("Search for this song")).clicked() {
+                let on_encore = art.has_song(&s.name, &s.artist);
+                if !on_encore && resp.clicked() {
+                    not_on_encore(ui.ctx(), &s.name, &s.artist, &s.charter);
+                } else if find || (on_encore && resp.on_hover_text(t("Search for this song")).clicked()) {
                     request_search(ui.ctx(), &song_query(&s.name, &s.artist, Some(&s.charter)));
                 }
             }
@@ -1150,14 +1196,18 @@ fn profile_view(ui: &mut egui::Ui, http: &Client, w: &mut Window, others: &mut [
                         plain(ui, RichText::new(sub).size(z.text).weak());
                     }
                     ui.with_layout(crate::theme::trailing(), |ui| {
-                        plain(ui, RichText::new(tr!("{count} plays", count = thousands(*plays))).size(z.text - 1.0).weak());
+                        plain(ui, RichText::new(crate::trn!(*plays, "{count} play", "{count} plays", count = *plays)).size(z.text - 1.0).weak());
                         mini_bar(ui, 100.0, *plays as f32 / max as f32, theme::accent());
                     });
                 });
                 if search && resp.on_hover_text(t("Search for this")).clicked() {
                     // Songs (name and artist), or an artist on their own.
-                    let query = if sub.is_empty() { field_query("a", main) } else { song_query(main, sub, None) };
-                    request_search(ui.ctx(), &query);
+                    if !sub.is_empty() && !art.has_song(main, sub) {
+                        not_on_encore(ui.ctx(), main, sub, "");
+                    } else {
+                        let query = if sub.is_empty() { field_query("a", main) } else { song_query(main, sub, None) };
+                        request_search(ui.ctx(), &query);
+                    }
                 }
             }
         });
@@ -1373,8 +1423,15 @@ fn stat_tile(ui: &mut egui::Ui, z: Sizes, k: usize, s: &Stat, players: u64, widt
             crate::theme::hrow(ui, |ui| {
                 // The icon's column; it's drawn once the text beside it is laid out, centred on it.
                 let (column, _) = ui.allocate_exact_size(vec2(34.0, 1.0), Sense::hover());
+                // Without a rank badge, the label and number sit in the middle of the tile (the
+                // badge's height split above and below), so the tile stays the same height.
+                let unranked = players > 0 && s.rank.is_none();
+                let half = (z.text + 6.0) / 2.0;
                 let body = crate::theme::vcol(ui, |ui| {
                     ui.spacing_mut().item_spacing.y = 2.0;
+                    if unranked {
+                        ui.add_space(half);
+                    }
                     plain(ui, RichText::new(t(s.label)).size(z.text - 1.0).weak());
                     // Big numbers shrink to fit rather than being cut short.
                     let width = ui.painter().layout_no_wrap(s.shown.clone(), egui::FontId::proportional(z.value), Color32::WHITE).size().x;
@@ -1385,9 +1442,8 @@ fn stat_tile(ui: &mut egui::Ui, z: Sizes, k: usize, s: &Stat, players: u64, widt
                             theme::tag(ui, &top_percent(rank, players), theme::accent())
                                 .on_hover_text(tr!("#{rank} of {players} players", rank = thousands(rank), players = thousands(players)));
                         }
-                        // Keep tiles the same height with or without a rank.
                         None if players > 0 => {
-                            ui.add_space(z.text + 6.0);
+                            ui.add_space(half);
                         }
                         None => {}
                     }
@@ -1579,6 +1635,12 @@ struct ScoreLine<'a> {
     detail: Option<String>,
     /// The song's album art (an Encore art id), if the catalogue has it.
     art: Option<&'a str>,
+    /// Encore has a chart of the song (so Find song has something to find).
+    on_encore: bool,
+    /// The song's name, artist and charter (for saying it isn't on Encore).
+    name: &'a str,
+    artist: &'a str,
+    charter: &'a str,
 }
 
 /// A score as a two-line row: the song (and player) with the score on the right, then an
@@ -1588,8 +1650,27 @@ fn score_row(ui: &mut egui::Ui, k: usize, z: Sizes, s: &ScoreLine, parts: Option
     let height = z.row * 1.7 + 14.0;
     let mut find = false;
     let resp = row(ui, k, height, true, false, |ui| {
-        // The album cover (or a note), then the instrument.
-        crate::cover(ui, covers, s.art, height - 12.0, crate::covers::THUMB);
+        // The album cover (or a note), then the instrument. Hovering the cover shows a
+        // magnifying glass that finds the song in Charts.
+        let art = crate::cover(ui, covers, s.art, height - 12.0, crate::covers::THUMB);
+        // Clone Hero's leaderboards have charts from anywhere; only ones on Encore can be found.
+        let glass = ui.interact(art, ui.id().with(("find_song", k)), Sense::click());
+        if !s.on_encore {
+            if glass.on_hover_text(t("This chart isn't on Chorus Encore")).clicked() {
+                not_on_encore(ui.ctx(), s.name, s.artist, s.charter);
+            }
+        } else {
+        glass.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, t("Find song")));
+        if glass.hovered() {
+            let p = ui.painter();
+            p.rect_filled(art, CornerRadius::same(5), Color32::from_black_alpha(130));
+            p.circle_filled(art.center(), (art.width() * 0.3).clamp(9.0, 18.0), theme::accent());
+            p.text(art.center(), egui::Align2::CENTER_CENTER, "🔍", egui::FontId::proportional((art.width() * 0.3).clamp(10.0, 17.0)), Color32::WHITE);
+        }
+        if glass.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(t("Search Charts for this song")).clicked() {
+            find = true;
+        }
+        }
         plain(ui, RichText::new(instrument_icon(s.instrument)).size(z.text + 6.0));
         ui.add_space(4.0);
         crate::theme::vcol(ui, |ui| {
@@ -1611,7 +1692,7 @@ fn score_row(ui: &mut egui::Ui, k: usize, z: Sizes, s: &ScoreLine, parts: Option
                     // A crown, as Clone Hero shows for a perfect full combo.
                     theme::tag(ui, "👑 PFC", theme::warn());
                 } else if s.fc {
-                    theme::tag(ui, "FC", theme::good());
+                    theme::tag(ui, "👑 FC", theme::good());
                 }
                 plain(ui, RichText::new(s.difficulty).size(z.text - 1.5).weak());
                 plain(ui, RichText::new(s.when).size(z.text - 1.5).weak());
@@ -1636,9 +1717,7 @@ fn score_row(ui: &mut egui::Ui, k: usize, z: Sizes, s: &ScoreLine, parts: Option
                 plain(ui, RichText::new(text).size(z.text - 1.0).weak()).on_hover_text(top_percent(place, of));
                 place_badge(ui, place);
             }
-            ui.add_space(8.0);
-            let button = ui.add(egui::Button::new(RichText::new(t("🔍 Find song")).size(z.text - 1.0)).min_size(vec2(0.0, 26.0)));
-            find = button.on_hover_text(t("Search Charts for this song")).clicked();
+
         });
     });
     (resp, find)
@@ -1722,13 +1801,10 @@ fn field_query(key: &str, value: &str) -> String {
     format!("{key}:\"{}\"", value.replace('"', "").trim())
 }
 
-/// A Charts search for exactly this song: its name and artist, and its charter if known.
-fn song_query(name: &str, artist: &str, charter: Option<&str>) -> String {
-    let mut q = vec![field_query("n", name), field_query("a", artist)];
-    if let Some(ch) = charter.filter(|c| !c.trim().is_empty()) {
-        q.push(field_query("ch", ch));
-    }
-    q.join(" ")
+/// A Charts search for exactly this song: its name and artist. (Not the charter: Clone Hero
+/// and Encore often write it differently, which would find nothing.)
+fn song_query(name: &str, artist: &str, _charter: Option<&str>) -> String {
+    [field_query("n", name), field_query("a", artist)].join(" ")
 }
 
 /// The profile being shown (id and name), for Back and Forward.

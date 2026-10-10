@@ -27,6 +27,9 @@ for code in src.values():
         add(m.group(1))
     for m in re.finditer(r'tr!\(\s*' + LIT, code):
         add(m.group(1))
+    for m in re.finditer(r'trn!\([^,]+,\s*' + LIT + r'\s*,\s*' + LIT, code):
+        add(m.group(1))
+        add(m.group(2))
 
 # Names shown from tables in other modules.
 api = src["api.rs"]

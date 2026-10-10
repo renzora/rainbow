@@ -364,6 +364,10 @@ pub fn scrollbar(ui: &mut egui::Ui, track: egui::Rect, id: egui::Id, offset: f32
     let pal = palette();
     let painter = ui.painter().clone();
     let max = (content - view).max(0.0);
+    // Nothing to scroll (or no results): no bar at all.
+    if max < 1.0 {
+        return None;
+    }
 
     // Sunken track: darker at the edges, lighter in the middle.
     let track_dark = pal.input;
@@ -558,6 +562,48 @@ impl egui::Widget for Bar {
 /// right-to-left language).
 pub fn trailing() -> egui::Layout {
     if crate::i18n::rtl() { egui::Layout::left_to_right(egui::Align::Center) } else { egui::Layout::right_to_left(egui::Align::Center) }
+}
+
+/// A rounded rectangle filled with a gradient from `top` to `bottom`.
+pub fn vertical_gradient(rect: egui::Rect, radius: f32, top: Color32, bottom: Color32) -> egui::Shape {
+    let r = radius.min(rect.height() / 2.0).min(rect.width() / 2.0);
+    let mut outline = Vec::new();
+    for (corner, start) in [
+        (egui::pos2(rect.right() - r, rect.top() + r), -90.0f32),
+        (egui::pos2(rect.right() - r, rect.bottom() - r), 0.0),
+        (egui::pos2(rect.left() + r, rect.bottom() - r), 90.0),
+        (egui::pos2(rect.left() + r, rect.top() + r), 180.0),
+    ] {
+        for step in 0..=6 {
+            let a = (start + step as f32 * 15.0).to_radians();
+            outline.push(corner + egui::vec2(a.cos(), a.sin()) * r);
+        }
+    }
+    let colour = |p: egui::Pos2| top.lerp_to_gamma(bottom, ((p.y - rect.top()) / rect.height()).clamp(0.0, 1.0));
+    let mut mesh = egui::Mesh::default();
+    mesh.colored_vertex(rect.center(), colour(rect.center()));
+    for p in &outline {
+        mesh.colored_vertex(*p, colour(*p));
+    }
+    let n = outline.len() as u32;
+    for i in 0..n {
+        mesh.add_triangle(0, 1 + i, 1 + (i + 1) % n);
+    }
+    egui::Shape::mesh(mesh)
+}
+
+/// Gives panel resize lines the look of the table's column bars (thick, in the theme's colours)
+/// for the panels added next; returns the style to put back inside them.
+pub fn thick_resize_bars(ui: &mut egui::Ui) -> std::sync::Arc<egui::Style> {
+    let normal = ui.style().clone();
+    let w = &mut ui.visuals_mut().widgets;
+    w.noninteractive.bg_stroke.width = 3.0;
+    w.hovered.fg_stroke = w.hovered.bg_stroke;
+    w.hovered.fg_stroke.width = 4.0;
+    w.active.fg_stroke = w.active.bg_stroke;
+    w.active.fg_stroke.width = 4.0;
+    ui.style_mut().interaction.resize_grab_radius_side = 7.0;
+    normal
 }
 
 /// A filled accent button for primary actions.

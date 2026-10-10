@@ -118,6 +118,8 @@ pub struct Filters {
     // Quick options.
     pub no_video: bool,
     pub no_broken: bool,
+    /// Only these charts (the favourites, when that filter is on).
+    pub favourites: Option<std::collections::BTreeSet<String>>,
     /// Only charts from the official Guitar Hero / Rock Band games.
     pub legacy: bool,
     /// Only charts from this game (a `games::game_key`).
@@ -140,7 +142,9 @@ impl Filters {
     }
 
     pub fn clear_advanced(&mut self) {
-        let keep = (self.query.clone(), self.instrument, self.difficulty, self.drum_type, self.sort, self.descending);
+        // The Search by fields are the query's field terms, so those go too.
+        let query = (0..self.text.len()).fold(self.query.clone(), |q, k| query::with_field(&q, k, "", false, false));
+        let keep = (query, self.instrument, self.difficulty, self.drum_type, self.sort, self.descending);
         *self = Filters::default();
         (self.query, self.instrument, self.difficulty, self.drum_type, self.sort, self.descending) = keep;
     }
@@ -201,13 +205,6 @@ impl Index {
                 terms.push(word.to_lowercase());
             }
         }
-        let text: Vec<(usize, String, bool, bool)> = f
-            .text
-            .iter()
-            .enumerate()
-            .filter(|(_, t)| !t.value.trim().is_empty())
-            .map(|(k, t)| (k, t.value.trim().to_lowercase(), t.exact, t.exclude))
-            .collect();
         let (length, intensity, avg_nps, max_nps, year) =
             (f.length_min.parse(), f.intensity.parse(), f.avg_nps.parse(), f.max_nps.parse(), f.year.parse());
         let hashes: HashSet<String> =
@@ -269,6 +266,9 @@ impl Index {
                         return false;
                     }
                 }
+                if f.favourites.as_ref().is_some_and(|favs| !favs.contains(&c.md5)) {
+                    return false;
+                }
                 if f.no_video && c.has(flag::VIDEO) || f.no_broken && c.has(flag::BROKEN) {
                     return false;
                 }
@@ -286,12 +286,6 @@ impl Index {
                 }
                 if f.instrument == Some(DRUMS) && f.drum_type.is_some() && c.drum_type != f.drum_type {
                     return false;
-                }
-                for (k, value, exact, exclude) in &text {
-                    let hit = if *exact { fields[*k] == *value } else { fields[*k].contains(value.as_str()) };
-                    if hit == *exclude {
-                        return false;
-                    }
                 }
                 if f.length_min.is_set() && !c.length().is_some_and(|ms| within(length, ms as f64 / 60000.0)) {
                     return false;

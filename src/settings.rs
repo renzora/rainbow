@@ -99,6 +99,10 @@ pub struct Settings {
     pub cover_size: f32,
     /// How the song list is ordered when Rainbow opens.
     pub default_sort: crate::filter::SortKey,
+    /// Preview speeds shown as percentages ("150%") instead of "1.5×".
+    pub speed_percent: bool,
+    /// Favourite charts, by MD5.
+    pub favourites: std::collections::BTreeSet<String>,
     /// The results table's column order, by name (dragged in the header); empty = the usual order.
     pub column_order: Vec<String>,
     /// Earlier search texts, newest first.
@@ -124,6 +128,8 @@ impl Default for Settings {
             cover_size: 42.0,
             default_sort: crate::filter::SortKey::Newest,
             column_order: Vec::new(),
+            favourites: Default::default(),
+            speed_percent: false,
             recent_searches: Vec::new(),
             check_updates: true,
             auto_update: false,

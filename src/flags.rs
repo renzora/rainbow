@@ -8,6 +8,7 @@ use eframe::egui;
 /// The flag shown for each language.
 const FLAGS: &[(&str, &[u8])] = &[
     ("en", include_bytes!("../assets/flags/gb.svg")),
+    ("en-US", include_bytes!("../assets/flags/us.svg")),
     ("ar", include_bytes!("../assets/flags/sa.svg")),
     ("cs", include_bytes!("../assets/flags/cz.svg")),
     ("de", include_bytes!("../assets/flags/de.svg")),

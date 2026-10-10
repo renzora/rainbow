@@ -274,6 +274,43 @@ fn understand(key: &str, value: &str, quoted: bool) -> Option<Cond> {
     }
 }
 
+/// The search box's term for text field `k` (index into the fields: name, artist, album,
+/// genre, year, charter): (value, quoted, negated), or empty if there isn't one.
+pub fn field_in_query(q: &str, k: usize) -> (String, bool, bool) {
+    let names = FIELDS.iter().find(|f| f.1 == k).map_or(&[][..], |f| f.0);
+    tokens(q)
+        .into_iter()
+        .rev()
+        .find(|t| t.key.is_some_and(|key| names.contains(&key.to_lowercase().as_str())))
+        .map_or((String::new(), false, false), |t| (t.value, t.quoted, t.negate))
+}
+
+/// The search box with text field `k`'s term replaced by `value` (none if it's empty), quoted
+/// (whole words) and/or negated as asked. Other terms are kept as they were.
+pub fn with_field(q: &str, k: usize, value: &str, quoted: bool, negate: bool) -> String {
+    let names = FIELDS.iter().find(|f| f.1 == k).map_or(&[][..], |f| f.0);
+    let mut parts: Vec<String> = tokens(q)
+        .into_iter()
+        .filter(|t| !t.key.is_some_and(|key| names.contains(&key.to_lowercase().as_str())))
+        .map(|t| t.raw.trim().to_owned())
+        .collect();
+    let value = value.replace('"', "");
+    if !value.trim().is_empty() {
+        let key = names.first().copied().unwrap_or("name");
+        let minus = if negate { "-" } else { "" };
+        let term = if quoted {
+            format!("{minus}{key}:\"{}\"", value.trim())
+        } else if value.trim().contains(' ') {
+            // Several words: "key: words" (it runs to the next term).
+            format!("{minus}{key}: {}", value.trim())
+        } else {
+            format!("{minus}{key}:{}", value.trim())
+        };
+        parts.push(term);
+    }
+    parts.join(" ")
+}
+
 /// Splits the search box into conditions, plus the plain (unquoted, not negated, no field) words,
 /// which the caller also checks for chart hashes and links.
 pub fn parse(q: &str) -> (Vec<Term>, Vec<String>) {
@@ -451,6 +488,16 @@ mod tests {
         // Unknown keys keep the space: "AC/DC: back" stays two words.
         let (_, words) = parse("ac/dc: back");
         assert_eq!(words, ["ac/dc:", "back"]);
+    }
+
+    #[test]
+    fn writing_fields() {
+        let q = with_field("fire", 1, "the killers", false, false);
+        assert_eq!(q, "fire artist: the killers");
+        assert_eq!(field_in_query(&q, 1), ("the killers".to_owned(), false, false));
+        let q = with_field(&q, 1, "queen", true, true);
+        assert_eq!(q, "fire -artist:\"queen\"");
+        assert_eq!(with_field(&q, 1, "", false, false), "fire");
     }
 
     #[test]
