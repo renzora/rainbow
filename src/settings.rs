@@ -83,6 +83,8 @@ pub struct Settings {
     pub delete_zips: bool,
     /// Convert Rock Band CON packages that appear in the songs folder.
     pub auto_convert: bool,
+    /// Interface language code ("auto" = follow the system).
+    pub language: String,
     /// Interface font.
     pub font: crate::theme::UiFont,
     /// Colour-vision mode for status and difficulty colours.
@@ -107,6 +109,7 @@ impl Default for Settings {
             delay_secs: 2.0,
             refresh_after_hours: Some(12),
             cover_size: 42.0,
+            language: "auto".to_owned(),
             font: crate::theme::UiFont::default(),
             color_blind: crate::theme::ColorBlind::Off,
             reduce_motion: false,

@@ -9,6 +9,7 @@ use anyhow::bail;
 use eframe::egui;
 use egui::{Color32, CornerRadius, Pos2, Rect, RichText, Sense, Stroke, pos2, vec2};
 
+use crate::i18n::t;
 use crate::api::{Chart, Client, DIFFICULTIES, INSTRUMENTS};
 use crate::chart::{self, BAR, Kind, Layout, Song, Track};
 use crate::sng;
@@ -56,7 +57,7 @@ impl Preview {
         });
         let inst = inst.filter(|&i| c.diffs[i as usize] >= 0).or_else(|| (0..10).find(|&i| c.diffs[i as usize] >= 0)).unwrap_or(0);
         Self {
-            title: format!("{} - {}", c.artist.as_deref().unwrap_or("Unknown Artist"), c.name.as_deref().unwrap_or("Unknown")),
+            title: format!("{} - {}", c.artist.clone().unwrap_or_else(|| t("Unknown Artist")), c.name.clone().unwrap_or_else(|| t("Unknown"))),
             state: State::Loading(rx),
             inst,
             diff: diff.unwrap_or(0),
@@ -117,12 +118,12 @@ impl Preview {
                 ui.vertical_centered(|ui| {
                     ui.add_space(ui.available_height() / 2.0 - 30.0);
                     ui.spinner();
-                    ui.label("Downloading the chart…");
+                    ui.label(t("Downloading the chart…"));
                 });
                 return;
             }
             State::Failed(e) => {
-                ui.colored_label(RED, format!("Couldn't load this chart: {e}"));
+                ui.colored_label(RED, crate::tr!("Couldn't load this chart: {error}", error = e));
                 return;
             }
             State::Ready(_) => {}
@@ -155,23 +156,23 @@ impl Preview {
         ui.horizontal(|ui| {
             let mut insts: Vec<u8> = song.tracks.iter().map(|t| t.inst).collect();
             insts.dedup();
-            egui::ComboBox::from_id_salt("preview_inst").selected_text(INSTRUMENTS[self.inst as usize].1).show_ui(ui, |ui| {
+            egui::ComboBox::from_id_salt("preview_inst").selected_text(t(INSTRUMENTS[self.inst as usize].1)).show_ui(ui, |ui| {
                 for i in insts {
-                    ui.selectable_value(&mut self.inst, i, INSTRUMENTS[i as usize].1);
+                    ui.selectable_value(&mut self.inst, i, t(INSTRUMENTS[i as usize].1));
                 }
             });
             let diffs: Vec<u8> = song.tracks.iter().filter(|t| t.inst == self.inst).map(|t| t.diff).collect();
             if !diffs.contains(&self.diff) {
                 self.diff = diffs.iter().copied().min().unwrap_or(0);
             }
-            egui::ComboBox::from_id_salt("preview_diff").selected_text(DIFFICULTIES[self.diff as usize].1).show_ui(ui, |ui| {
+            egui::ComboBox::from_id_salt("preview_diff").selected_text(t(DIFFICULTIES[self.diff as usize].1)).show_ui(ui, |ui| {
                 for d in diffs {
-                    ui.selectable_value(&mut self.diff, d, DIFFICULTIES[d as usize].1);
+                    ui.selectable_value(&mut self.diff, d, t(DIFFICULTIES[d as usize].1));
                 }
             });
             if let Some(t) = song.track(self.inst, self.diff) {
                 let gems = t.notes.iter().filter(|n| !matches!(n.kind, Kind::DoubleKick)).count();
-                ui.weak(format!("{gems} notes"));
+                ui.weak(crate::tr!("{count} notes", count = gems));
             }
         });
         ui.add_space(4.0);
@@ -195,7 +196,7 @@ impl Preview {
         ui.add_space(6.0);
         ui.horizontal(|ui| {
             let icon = if self.playing { "⏸" } else { "▶" };
-            if ui.add(egui::Button::new(RichText::new(icon).size(16.0)).min_size(vec2(36.0, 28.0))).on_hover_text("Play/pause (Space)").clicked() {
+            if ui.add(egui::Button::new(RichText::new(icon).size(16.0)).min_size(vec2(36.0, 28.0))).on_hover_text(t("Play/pause (Space)")).clicked() {
                 self.toggle(song.end);
             }
             ui.label(RichText::new(format!("{} / {}", clock(self.time), clock(song.end))).monospace());
@@ -211,11 +212,11 @@ impl Preview {
                     }
                 })
                 .response
-                .on_hover_text("Playback speed");
+                .on_hover_text(t("Playback speed"));
             ui.spacing_mut().slider_width = 70.0;
             // Note speed: a shorter window makes notes move faster.
             let mut note_speed = 3.2 / self.window;
-            if ui.add(egui::Slider::new(&mut note_speed, 1.0..=4.0).show_value(false)).on_hover_text("Note speed").changed() {
+            if ui.add(egui::Slider::new(&mut note_speed, 1.0..=4.0).show_value(false)).on_hover_text(t("Note speed")).changed() {
                 self.window = 3.2 / note_speed;
             }
         });

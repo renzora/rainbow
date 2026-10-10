@@ -475,7 +475,9 @@ pub fn chip(ui: &mut egui::Ui, text: &str, color: Color32) -> egui::Response {
 /// Uses the bundled Noto fonts (assets/fonts, SIL Open Font License) on every OS: Noto Sans
 /// for the UI, with Noto Emoji for icons and Noto Sans JP for Japanese/Chinese chart names.
 /// egui's own fonts stay in the list as a fallback for its UI symbols.
-pub fn install_fonts(ctx: &egui::Context, choice: UiFont) {
+/// `language` picks which CJK font comes first, since Chinese and Japanese share characters
+/// but draw some of them differently.
+pub fn install_fonts(ctx: &egui::Context, choice: UiFont, language: &str) {
     use std::sync::Arc;
     use egui::{FontData, FontFamily};
 
@@ -485,6 +487,10 @@ pub fn install_fonts(ctx: &egui::Context, choice: UiFont) {
         ("noto-sans-bold", &include_bytes!("../assets/fonts/NotoSans-Bold.ttf")[..]),
         ("noto-emoji", &include_bytes!("../assets/fonts/NotoEmoji.ttf")[..]),
         ("noto-sans-jp", &include_bytes!("../assets/fonts/NotoSansJP.ttf")[..]),
+        // Only the characters Rainbow's Korean and Chinese translations use (tools/subset_cjk.py).
+        ("noto-sans-kr", &include_bytes!("../assets/fonts/NotoSansKR-UI.ttf")[..]),
+        ("noto-sans-sc", &include_bytes!("../assets/fonts/NotoSansSC-UI.ttf")[..]),
+        ("noto-sans-tc", &include_bytes!("../assets/fonts/NotoSansTC-UI.ttf")[..]),
         ("rainbow-rounded", &include_bytes!("../assets/fonts/RainbowRounded.ttf")[..]),
         ("atkinson", &include_bytes!("../assets/fonts/AtkinsonHyperlegible.ttf")[..]),
         ("lexend", &include_bytes!("../assets/fonts/Lexend.ttf")[..]),
@@ -492,7 +498,13 @@ pub fn install_fonts(ctx: &egui::Context, choice: UiFont) {
     ] {
         fonts.font_data.insert(name.to_owned(), Arc::new(FontData::from_static(bytes)));
     }
-    let fallbacks = ["noto-sans", "noto-emoji", "noto-sans-jp"].map(str::to_owned);
+    let cjk: [&str; 4] = match language {
+        "zh-CN" => ["noto-sans-sc", "noto-sans-tc", "noto-sans-jp", "noto-sans-kr"],
+        "zh-TW" => ["noto-sans-tc", "noto-sans-sc", "noto-sans-jp", "noto-sans-kr"],
+        "ko" => ["noto-sans-kr", "noto-sans-jp", "noto-sans-sc", "noto-sans-tc"],
+        _ => ["noto-sans-jp", "noto-sans-kr", "noto-sans-sc", "noto-sans-tc"],
+    };
+    let fallbacks: Vec<String> = ["noto-sans", "noto-emoji"].into_iter().chain(cjk).map(str::to_owned).collect();
 
     // The chosen face first; Noto covers anything it lacks, then egui's own symbol fonts.
     let proportional = fonts.families.entry(FontFamily::Proportional).or_default();

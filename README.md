@@ -47,6 +47,27 @@ cargo build --release
 # target/release/rainbow(.exe)
 ```
 
+## Translations
+
+Rainbow follows your system language and has a language picker in the status bar. It ships
+with English plus Spanish, Brazilian Portuguese, French, German, Italian, Dutch, Polish,
+Swedish, Czech, Turkish, Russian, Ukrainian, Indonesian, Vietnamese, Japanese, Korean and
+Simplified and Traditional Chinese.
+
+Each language is one file in `assets/lang/` that maps the English text to its translation.
+To fix a translation or add a language without rebuilding, put a file in
+`%LOCALAPPDATA%ainbow\lang\` (copy `assets/lang/template.json` to start a new one; the
+file name is the language code, e.g. `pt-PT.json`). For contributors:
+
+- `python tools/extract_strings.py` refreshes `template.json` after code changes.
+- `python tools/check_translations.py` checks every language for missing strings and
+  broken `{placeholders}`.
+- `python tools/subset_cjk.py <fonts folder>` rebuilds the small Korean and Chinese fonts
+  after their translations change.
+
+Right-to-left and complex scripts (Arabic, Hebrew, Hindi, Thai) aren't supported yet,
+because the UI library can't lay them out correctly.
+
 ## Fonts
 
 Rainbow bundles its fonts, all under the SIL Open Font License (see `assets/fonts`). The

@@ -10,6 +10,7 @@ mod covers;
 mod dta;
 mod filter;
 mod games;
+mod i18n;
 mod import;
 mod preview;
 mod settings;
@@ -30,6 +31,12 @@ use egui::{Color32, CornerRadius, CursorIcon, RichText, Sense, vec2};
 use egui_extras::{Column, TableBuilder};
 
 use api::{Chart, Client, DIFFICULTIES, DRUM_TYPES, DRUMS, INSTRUMENTS, Manifest, flag};
+use i18n::t;
+
+/// Marks a string for translation where it's defined; it's translated where it's shown.
+const fn n(s: &'static str) -> &'static str {
+    s
+}
 use catalogue::Catalogue;
 use covers::Covers;
 use filter::{Filters, Index, Range, SortKey, TEXT_FIELDS, TOGGLES};
@@ -160,6 +167,8 @@ struct App {
     saved_settings: Settings,
     tab: Tab,
     logo: Option<egui::TextureHandle>,
+    /// Interface languages, built in and from the user's lang folder.
+    languages: Vec<i18n::Language>,
     renzora: Option<egui::TextureHandle>,
     covers: Covers,
 
@@ -233,8 +242,9 @@ impl App {
             repaint.request_repaint();
         }));
         let settings = Settings::load();
+        i18n::set_language(&settings.language);
         theme::apply(ctx, settings.theme, settings.zoom, settings.access());
-        theme::install_fonts(ctx, settings.font);
+        theme::install_fonts(ctx, settings.font, &i18n::current());
         egui_extras::install_image_loaders(ctx);
         let logo = image::load_from_memory(LOGO_PNG).ok().map(|img| {
             let img = img.resize(96, 96, image::imageops::FilterType::Triangle).to_rgba8();
@@ -255,6 +265,7 @@ impl App {
             settings,
             tab: Tab::Browse,
             logo,
+            languages: i18n::languages(),
             renzora,
             covers: Covers::new(ctx),
             charts: Vec::new(),
@@ -459,7 +470,7 @@ impl App {
         if press(Modifiers::COMMAND, Key::D) && self.job.is_none() && !self.selected.is_empty() {
             let charts = self.selected_charts();
             self.selected.clear();
-            self.request_download(format!("{} selected chart(s)", charts.len()), charts);
+            self.request_download(tr!("{count} selected chart(s)", count = charts.len()), charts);
         }
         if press(Modifiers::COMMAND, Key::P)
             && let Some(c) = self.detail.clone()
@@ -526,11 +537,12 @@ impl App {
         }
     }
 
-    /// While the chart preview is open, covers the app with a blurred, dimmed copy of itself.
-    /// Clicking it closes the preview. Returns false on the frame the screenshot for the blur
+    /// While a pop-up (chart preview, download confirmation, shortcuts) is open, covers the app
+    /// with a blurred, dimmed copy of itself. Clicking it closes the pop-up. Returns false on the frame the screenshot for the blur
     /// is taken, so the preview isn't in it.
-    fn preview_backdrop(&mut self, ctx: &egui::Context) -> bool {
-        if self.preview.is_none() {
+    fn modal_backdrop(&mut self, ctx: &egui::Context) -> bool {
+        let open = self.preview.is_some() || self.confirm.is_some() || self.show_shortcuts;
+        if !open {
             self.backdrop = None;
             self.backdrop_requested = false;
             return false;
@@ -572,7 +584,14 @@ impl App {
                 close = resp.on_hover_cursor(CursorIcon::Default).clicked();
             });
         if close {
-            self.preview = None;
+            // Close the top-most pop-up.
+            if self.show_shortcuts {
+                self.show_shortcuts = false;
+            } else if self.confirm.is_some() {
+                self.confirm = None;
+            } else {
+                self.preview = None;
+            }
             return false;
         }
         true
@@ -592,23 +611,30 @@ impl App {
 
     fn shortcuts_window(&mut self, ctx: &egui::Context) {
         let mut open = self.show_shortcuts;
-        egui::Window::new("⌨  Keyboard shortcuts").open(&mut open).collapsible(false).resizable(false).anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0]).show(ctx, |ui| {
+        egui::Window::new(t("⌨  Keyboard shortcuts"))
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .order(egui::Order::Foreground)
+            .pivot(egui::Align2::CENTER_CENTER)
+            .fixed_pos(ctx.content_rect().center())
+            .show(ctx, |ui| {
             let ctrl = if cfg!(target_os = "macos") { "Cmd" } else { "Ctrl" };
             let rows: Vec<(String, &str)> = vec![
-                (format!("{ctrl}+F"), "Search"),
-                (format!("{ctrl}+K"), "Advanced search"),
-                ("↑ ↓  PgUp PgDn  Home End".into(), "Move through results"),
-                ("Shift + ↑ ↓".into(), "Add rows to the selection"),
-                ("Space".into(), "Tick / untick the current row"),
-                ("Enter".into(), "Show the current row's details"),
-                (format!("{ctrl}+A"), "Select all results"),
-                ("Esc".into(), "Close details, then clear selection"),
-                (format!("{ctrl}+D"), "Download selected"),
-                (format!("{ctrl}+P"), "Preview the chart in details"),
-                (format!("{ctrl}+1 / {ctrl}+2"), "Browse / Settings"),
-                (format!("{ctrl}+L"), "Show or hide the log"),
-                ("F5".into(), "Check for new charts"),
-                ("F1".into(), "This list"),
+                (format!("{ctrl}+F"), n("Search")),
+                (format!("{ctrl}+K"), n("Advanced search")),
+                ("↑ ↓  PgUp PgDn  Home End".into(), n("Move through results")),
+                ("Shift + ↑ ↓".into(), n("Add rows to the selection")),
+                ("Space".into(), n("Tick / untick the current row")),
+                ("Enter".into(), n("Show the current row's details")),
+                (format!("{ctrl}+A"), n("Select all results")),
+                ("Esc".into(), n("Close details, then clear selection")),
+                (format!("{ctrl}+D"), n("Download selected")),
+                (format!("{ctrl}+P"), n("Preview the chart in details")),
+                (format!("{ctrl}+1 / {ctrl}+2"), n("Browse / Settings")),
+                (format!("{ctrl}+L"), n("Show or hide the log")),
+                ("F5".into(), n("Check for new charts")),
+                ("F1".into(), n("This list")),
             ];
             egui::Grid::new("shortcuts").num_columns(2).spacing([24.0, 8.0]).show(ui, |ui| {
                 for (keys, what) in rows {
@@ -617,7 +643,7 @@ impl App {
                         .corner_radius(CornerRadius::same(6))
                         .inner_margin(egui::Margin::symmetric(8, 3))
                         .show(ui, |ui| ui.label(RichText::new(keys).monospace().strong()));
-                    ui.label(RichText::new(what).size(14.5));
+                    ui.label(RichText::new(t(what)).size(14.5));
                     ui.end_row();
                 }
             });
@@ -675,11 +701,11 @@ impl App {
         painter.rect_filled(screen, CornerRadius::ZERO, Color32::from_black_alpha(190));
         let inner = screen.shrink(24.0);
         painter.rect_stroke(inner, CornerRadius::same(18), egui::Stroke::new(3.0, theme::accent_hover()), egui::StrokeKind::Inside);
-        painter.text(inner.center() - vec2(0.0, 18.0), egui::Align2::CENTER_CENTER, "Drop to import", egui::FontId::proportional(30.0), Color32::WHITE);
+        painter.text(inner.center() - vec2(0.0, 18.0), egui::Align2::CENTER_CENTER, t("Drop to import"), egui::FontId::proportional(30.0), Color32::WHITE);
         painter.text(
             inner.center() + vec2(0.0, 20.0),
             egui::Align2::CENTER_CENTER,
-            "Rock Band CON files are converted for Clone Hero · .zip files are extracted",
+            t("Rock Band CON files are converted for Clone Hero · .zip files are extracted"),
             egui::FontId::proportional(16.0),
             Color32::from_gray(210),
         );
@@ -830,9 +856,9 @@ impl App {
             }
             ui.label(theme::title(24.0));
             ui.add_space(18.0);
-            for (tab, label) in [(Tab::Browse, "🔍  Browse"), (Tab::Settings, "⚙  Settings")] {
+            for (tab, label) in [(Tab::Browse, n("🔍  Browse")), (Tab::Settings, n("⚙  Settings"))] {
                 let on = self.tab == tab;
-                let text = RichText::new(label).size(15.0);
+                let text = RichText::new(t(label)).size(15.0);
                 let button = if on {
                     egui::Button::new(text.color(theme::on_accent()).strong()).fill(theme::accent())
                 } else {
@@ -861,7 +887,7 @@ impl App {
             let resp = ui.add(
                 egui::TextEdit::singleline(&mut self.filters.query)
                     .id(egui::Id::new("search"))
-                    .hint_text("🔍  Search songs, artists, albums, charters…  (Ctrl+F)")
+                    .hint_text(t("🔍  Search songs, artists, albums, charters…  (Ctrl+F)"))
                     .font(egui::FontId::proportional(16.0))
                     .margin(egui::Margin::symmetric(10, 7))
                     .desired_width((ui.available_width() - self.search_controls_w - 16.0).max(200.0)),
@@ -872,36 +898,37 @@ impl App {
                 self.live_edited = Instant::now();
             }
 
-            let inst_text = self.filters.instrument.map_or("🎵  Any Instrument".to_owned(), |i| {
-                format!("{}  {}", instrument_icon(i), INSTRUMENTS[i as usize].1)
+            let inst_text = self.filters.instrument.map_or(t("🎵  Any Instrument"), |i| {
+                format!("{}  {}", instrument_icon(i), t(INSTRUMENTS[i as usize].1))
             });
             egui::ComboBox::from_id_salt("instrument").selected_text(inst_text).width(180.0).show_ui(ui, |ui| {
-                ui.selectable_value(&mut self.filters.instrument, None, "🎵  Any Instrument");
+                ui.selectable_value(&mut self.filters.instrument, None, t("🎵  Any Instrument"));
                 for (k, (_, name, _)) in INSTRUMENTS.iter().enumerate() {
-                    let label = format!("{}  {name}", instrument_icon(k as u8));
+                    let label = format!("{}  {}", instrument_icon(k as u8), t(name));
                     ui.selectable_value(&mut self.filters.instrument, Some(k as u8), label);
                 }
             });
-            let diff_text = self.filters.difficulty.map_or("Any Difficulty", |d| DIFFICULTIES[d as usize].1);
+            let diff_text = self.filters.difficulty.map_or(t("Any Difficulty"), |d| t(DIFFICULTIES[d as usize].1));
             egui::ComboBox::from_id_salt("difficulty").selected_text(diff_text).width(120.0).show_ui(ui, |ui| {
-                ui.selectable_value(&mut self.filters.difficulty, None, "Any Difficulty");
+                ui.selectable_value(&mut self.filters.difficulty, None, t("Any Difficulty"));
                 for (k, (_, name)) in DIFFICULTIES.iter().enumerate() {
-                    ui.selectable_value(&mut self.filters.difficulty, Some(k as u8), *name);
+                    ui.selectable_value(&mut self.filters.difficulty, Some(k as u8), t(name));
                 }
             });
             if self.filters.instrument == Some(DRUMS) {
-                let dt = self.filters.drum_type.map_or("Any Drum Type", |d| DRUM_TYPES[d as usize]);
+                let dt = self.filters.drum_type.map_or(t("Any Drum Type"), |d| t(DRUM_TYPES[d as usize]));
                 egui::ComboBox::from_id_salt("drumtype").selected_text(dt).width(110.0).show_ui(ui, |ui| {
-                    ui.selectable_value(&mut self.filters.drum_type, None, "Any Drum Type");
+                    ui.selectable_value(&mut self.filters.drum_type, None, t("Any Drum Type"));
                     for (k, name) in DRUM_TYPES.iter().enumerate() {
-                        ui.selectable_value(&mut self.filters.drum_type, Some(k as u8), *name);
+                        ui.selectable_value(&mut self.filters.drum_type, Some(k as u8), t(name));
                     }
                 });
             }
 
             let n = self.filters.advanced_count();
             let label = format!(
-                "🎛  Advanced search{} {}",
+                "{}{} {}",
+                t("🎛  Advanced search"),
                 if n > 0 { format!(" ({n})") } else { String::new() },
                 if self.show_advanced { "⏶" } else { "⏷" }
             );
@@ -915,34 +942,34 @@ impl App {
         ui.horizontal(|ui| {
             let f = &mut self.filters;
             let all = !f.no_video && !f.no_broken && !f.legacy && f.game.is_none() && f.advanced_count() == 0;
-            if pill(ui, all, "🌈  All songs").on_hover_text("Clear all filters").clicked() {
+            if pill(ui, all, &t("🌈  All songs")).on_hover_text(t("Clear all filters")).clicked() {
                 f.no_video = false;
                 f.no_broken = false;
                 f.legacy = false;
                 f.game = None;
                 f.clear_advanced();
             }
-            if pill(ui, f.no_video, "🎬  No videos").on_hover_text("Hide charts that have a video background").clicked() {
+            if pill(ui, f.no_video, &t("🎬  No videos")).on_hover_text(t("Hide charts that have a video background")).clicked() {
                 f.no_video = !f.no_video;
             }
-            if pill(ui, f.no_broken, "🛠  No broken songs")
-                .on_hover_text("Hide charts Encore flags as unplayable: missing or unreadable chart/audio, or no notes")
+            if pill(ui, f.no_broken, &t("🛠  No broken songs"))
+                .on_hover_text(t("Hide charts Encore flags as unplayable: missing or unreadable chart/audio, or no notes"))
                 .clicked()
             {
                 f.no_broken = !f.no_broken;
             }
             ui.separator();
-            if pill(ui, f.legacy || f.game.is_some(), "🏆  Legacy")
-                .on_hover_text("Only the original charts from the official Guitar Hero and Rock Band games and their DLC")
+            if pill(ui, f.legacy || f.game.is_some(), &t("🏆  Legacy"))
+                .on_hover_text(t("Only the original charts from the official Guitar Hero and Rock Band games and their DLC"))
                 .clicked()
             {
                 f.legacy = !(f.legacy || f.game.is_some());
                 f.game = None;
             }
-            let label = f.game.as_deref().map_or("🎮  Any game".to_owned(), |g| format!("🎮  {}", games::game_name(g)));
+            let label = f.game.as_deref().map_or(t("🎮  Any game"), |g| format!("🎮  {}", games::game_name(g)));
             let index = &self.index;
             egui::ComboBox::from_id_salt("game").selected_text(label).width(240.0).show_ui(ui, |ui| {
-                ui.selectable_value(&mut f.game, None, "🎮  Any game");
+                ui.selectable_value(&mut f.game, None, t("🎮  Any game"));
                 for (g, n) in index.games() {
                     ui.selectable_value(&mut f.game, Some(g.clone()), format!("{}  ({n})", games::game_name(&g)));
                 }
@@ -976,13 +1003,13 @@ impl App {
                 frame.show(ui, |ui| {
                     ui.set_width(width - 32.0);
                     ui.horizontal(|ui| {
-                        ui.label(RichText::new("🎛  Advanced search").size(17.0).strong().color(theme::accent_hover()));
-                        ui.weak(format!("{} results", self.results.len()));
+                        ui.label(RichText::new(t("🎛  Advanced search")).size(17.0).strong().color(theme::accent_hover()));
+                        ui.weak(tr!("{count} results", count = self.results.len()));
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui.button("✖  Close").on_hover_text("Esc").clicked() {
+                            if ui.button(t("✖  Close")).on_hover_text(t("Esc")).clicked() {
                                 self.show_advanced = false;
                             }
-                            if ui.button("↺  Reset").on_hover_text("Clear all advanced filters").clicked() {
+                            if ui.button(t("↺  Reset")).on_hover_text(t("Clear all advanced filters")).clicked() {
                                 self.filters.clear_advanced();
                             }
                         });
@@ -1024,10 +1051,10 @@ impl App {
         let f = &mut self.filters;
         let inner = width - 26.0; // frame margin + stroke
         let title = match section {
-            Section::Text => "🔤  Search by",
-            Section::Ranges => "📏  Ranges",
-            Section::Chart => "🔑  Chart",
-            Section::Features => "✨  Features",
+            Section::Text => n("🔤  Search by"),
+            Section::Ranges => n("📏  Ranges"),
+            Section::Chart => n("🔑  Chart"),
+            Section::Features => n("✨  Features"),
         };
         egui::Frame::new()
             .fill(ui.visuals().faint_bg_color)
@@ -1037,18 +1064,18 @@ impl App {
             .show(ui, |ui| {
                 ui.set_width(inner);
                 ui.vertical(|ui| {
-                    ui.label(RichText::new(title).strong().color(theme::accent_hover()));
+                    ui.label(RichText::new(t(title)).strong().color(theme::accent_hover()));
                     ui.add_space(6.0);
                     match section {
                         Section::Text => {
                             let field_w = inner - 2.0 * 52.0 - 16.0;
                             egui::Grid::new("adv_text").num_columns(3).spacing([8.0, 5.0]).show(ui, |ui| {
                                 ui.label("");
-                                ui.small("Exact").on_hover_text("Only include results that match perfectly. (not case sensitive)");
-                                ui.small("Exclude").on_hover_text("Do not include results that match this.");
+                                ui.small(t("Exact")).on_hover_text(t("Only include results that match perfectly. (not case sensitive)"));
+                                ui.small(t("Exclude")).on_hover_text(t("Do not include results that match this."));
                                 ui.end_row();
                                 for (k, label) in TEXT_FIELDS.iter().enumerate() {
-                                    let resp = ui.add_sized([field_w, 24.0], egui::TextEdit::singleline(&mut f.text[k].value).hint_text(*label));
+                                    let resp = ui.add_sized([field_w, 24.0], egui::TextEdit::singleline(&mut f.text[k].value).hint_text(t(label)));
                                     text_menu(&resp, &mut f.text[k].value);
                                     ui.vertical_centered(|ui| theme::checkbox(ui, &mut f.text[k].exact, ""));
                                     ui.vertical_centered(|ui| theme::checkbox(ui, &mut f.text[k].exclude, ""));
@@ -1060,11 +1087,11 @@ impl App {
                             let label_w = inner - 2.0 * 64.0 - 16.0;
                             egui::Grid::new("adv_ranges").num_columns(3).spacing([8.0, 5.0]).min_col_width(0.0).show(ui, |ui| {
                                 for (label, range, tip) in [
-                                    ("⏱  Length (min)", &mut f.length_min, ""),
-                                    ("🔥  Intensity", &mut f.intensity, "Also known as chart difficulty. Typically a number between 0 and 6."),
-                                    ("⚡  Average NPS", &mut f.avg_nps, "Average notes per second, for the chosen instrument/difficulty."),
-                                    ("🚀  Max NPS", &mut f.max_nps, "Highest notes per second, for the chosen instrument/difficulty."),
-                                    ("📅  Year", &mut f.year, ""),
+                                    (n("⏱  Length (min)"), &mut f.length_min, ""),
+                                    (n("🔥  Intensity"), &mut f.intensity, n("Also known as chart difficulty. Typically a number between 0 and 6.")),
+                                    (n("⚡  Average NPS"), &mut f.avg_nps, n("Average notes per second, for the chosen instrument/difficulty.")),
+                                    (n("🚀  Max NPS"), &mut f.max_nps, n("Highest notes per second, for the chosen instrument/difficulty.")),
+                                    (n("📅  Year"), &mut f.year, ""),
                                 ] {
                                     range_row(ui, label, range, tip, label_w);
                                 }
@@ -1073,12 +1100,12 @@ impl App {
                         Section::Chart => {
                             let field_w = inner - 110.0;
                             egui::Grid::new("adv_misc").num_columns(2).spacing([8.0, 5.0]).show(ui, |ui| {
-                                ui.label("Modified after").on_hover_text("The date of the last time this chart was modified in Google Drive.");
+                                ui.label(t("Modified after")).on_hover_text(t("The date of the last time this chart was modified in Google Drive."));
                                 ui.horizontal(|ui| {
                                     // Type a date, or pick one from the calendar popup.
                                     let clear_w = if f.modified_after.is_empty() { 0.0 } else { 30.0 };
                                     let text_w = (field_w - 48.0 - clear_w).max(80.0);
-                                    let resp = ui.add_sized([text_w, 24.0], egui::TextEdit::singleline(&mut f.modified_after).hint_text("YYYY-MM-DD"));
+                                    let resp = ui.add_sized([text_w, 24.0], egui::TextEdit::singleline(&mut f.modified_after).hint_text(t("YYYY-MM-DD")));
                                     text_menu(&resp, &mut f.modified_after);
                                     let mut date = f.modified_after.trim().parse::<jiff::civil::Date>().unwrap_or_else(|_| jiff::Zoned::now().date());
                                     let picker = egui_extras::DatePickerButton::new(&mut date)
@@ -1086,20 +1113,20 @@ impl App {
                                         .format("")
                                         .show_icon(true)
                                         .calendar_week(false);
-                                    if ui.add(picker).on_hover_text("Pick a date").changed() {
+                                    if ui.add(picker).on_hover_text(t("Pick a date")).changed() {
                                         f.modified_after = date.to_string();
                                     }
-                                    if !f.modified_after.is_empty() && ui.small_button("✖").on_hover_text("Clear the date").clicked() {
+                                    if !f.modified_after.is_empty() && ui.small_button("✖").on_hover_text(t("Clear the date")).clicked() {
                                         f.modified_after.clear();
                                     }
                                 });
                                 ui.end_row();
-                                ui.label("Hash").on_hover_text("The MD5 hash of the chart folder or .sng file. You can enter multiple values if they are separated by commas.");
-                                let resp = ui.add_sized([field_w, 24.0], egui::TextEdit::singleline(&mut f.hash).hint_text("md5, md5, …"));
+                                ui.label(t("Hash")).on_hover_text(t("The MD5 hash of the chart folder or .sng file. You can enter multiple values if they are separated by commas."));
+                                let resp = ui.add_sized([field_w, 24.0], egui::TextEdit::singleline(&mut f.hash).hint_text(t("md5, md5, …")));
                                 text_menu(&resp, &mut f.hash);
                                 ui.end_row();
-                                ui.label("Track hash").on_hover_text("The hash of only things that impact scoring on a specific track. Multiple values can be separated by commas. Press Enter to look it up on Encore's server.");
-                                let resp = ui.add_sized([field_w, 24.0], egui::TextEdit::singleline(&mut f.track_hash).hint_text("press Enter to look up"));
+                                ui.label(t("Track hash")).on_hover_text(t("The hash of only things that impact scoring on a specific track. Multiple values can be separated by commas. Press Enter to look it up on Encore's server."));
+                                let resp = ui.add_sized([field_w, 24.0], egui::TextEdit::singleline(&mut f.track_hash).hint_text(t("press Enter to look up")));
                                 if text_menu(&resp, &mut f.track_hash) {
                                     f.track_md5s = None;
                                 }
@@ -1114,14 +1141,14 @@ impl App {
                             if track_lookup {
                                 ui.horizontal(|ui| {
                                     ui.spinner();
-                                    ui.small("Looking up track hash…");
+                                    ui.small(t("Looking up track hash…"));
                                 });
                             } else if let Some(md5s) = &f.track_md5s {
-                                ui.small(format!("Track hash matches {} chart(s)", md5s.len()));
+                                ui.small(tr!("Track hash matches {count} chart(s)", count = md5s.len()));
                             }
                         }
                         Section::Features => {
-                            ui.small("Click to cycle: any → must have → must not have");
+                            ui.small(t("Click to cycle: any → must have → must not have"));
                             ui.add_space(4.0);
                             ui.horizontal_wrapped(|ui| {
                                 ui.spacing_mut().item_spacing = vec2(6.0, 6.0);
@@ -1132,7 +1159,7 @@ impl App {
                                         Some(true) => ("✔", theme::good(), theme::good().linear_multiply(0.18)),
                                         Some(false) => ("✖", theme::bad(), theme::bad().linear_multiply(0.18)),
                                     };
-                                    let button = egui::Button::new(RichText::new(format!("{icon} {label}")).color(color))
+                                    let button = egui::Button::new(RichText::new(format!("{icon} {}", t(label))).color(color))
                                         .fill(fill)
                                         .corner_radius(CornerRadius::same(14));
                                     let resp = ui.add_enabled(applies.enabled(f.instrument), button);
@@ -1160,7 +1187,7 @@ impl App {
                 CatStatus::Building { page, pages, charts } => {
                     ui.spinner();
                     if self.cat_complete {
-                        ui.label(format!("Checking for new charts… {charts} charts"));
+                        ui.label(tr!("Checking for new charts… {count} charts", count = charts));
                     } else {
                         if *pages > 0 {
                             ui.add(
@@ -1169,29 +1196,29 @@ impl App {
                                     .text(format!("{page}/{pages}")),
                             );
                         }
-                        ui.label(format!("Downloading catalogue: {charts} charts"))
-                            .on_hover_text("Already searchable: results fill in as it downloads.");
+                        ui.label(tr!("Downloading catalogue: {count} charts", count = charts))
+                            .on_hover_text(t("Already searchable: results fill in as it downloads."));
                     }
-                    if ui.small_button("⏸").on_hover_text("Pause").clicked() {
+                    if ui.small_button("⏸").on_hover_text(t("Pause")).clicked() {
                         self.cat_stop.store(true, Ordering::Relaxed);
                     }
                 }
                 CatStatus::Failed(e) => {
-                    ui.colored_label(theme::bad(), "⚠ Catalogue update failed").on_hover_text(e.clone());
-                    if ui.small_button("Retry").clicked() {
+                    ui.colored_label(theme::bad(), t("⚠ Catalogue update failed")).on_hover_text(e.clone());
+                    if ui.small_button(t("Retry")).clicked() {
                         self.update_catalogue(false);
                     }
                 }
                 CatStatus::Idle if self.cat_complete => {
-                    ui.label(format!("📚 {} charts", self.charts.len()));
-                    ui.weak(format!("updated {}", ago(self.cat_updated)));
-                    if ui.small_button("⟳").on_hover_text("Check Encore for new charts").clicked() {
+                    ui.label(tr!("📚 {count} charts", count = self.charts.len()));
+                    ui.weak(tr!("updated {when}", when = ago(self.cat_updated)));
+                    if ui.small_button("⟳").on_hover_text(t("Check Encore for new charts")).clicked() {
                         self.update_catalogue(false);
                     }
                 }
                 CatStatus::Idle => {
-                    ui.label(format!("Catalogue paused at {} charts", self.charts.len()));
-                    if ui.small_button("▶").on_hover_text("Resume").clicked() {
+                    ui.label(tr!("Catalogue paused at {count} charts", count = self.charts.len()));
+                    if ui.small_button("▶").on_hover_text(t("Resume")).clicked() {
                         self.update_catalogue(false);
                     }
                 }
@@ -1209,33 +1236,64 @@ impl App {
                     Some(egui::include_image!("../assets/icons/github.svg")),
                     "GitHub",
                     "https://github.com/renzora/rainbow",
-                    "Rainbow's source code, releases and issue tracker",
+                    n("Rainbow's source code, releases and issue tracker"),
                 );
                 web_link(
                     ui,
                     Some(egui::include_image!("../assets/icons/patreon.svg")),
                     "Patreon",
                     "https://www.patreon.com/cw/ChorusEncore701?l=en-GB",
-                    "Support Chorus Encore: it's donation-funded and pays for the servers and file hosting Rainbow uses",
+                    n("Support Chorus Encore: it's donation-funded and pays for the servers and file hosting Rainbow uses"),
                 );
                 web_link(
                     ui,
                     Some(egui::include_image!("../assets/icons/discord.svg")),
                     "Discord",
                     "https://discord.gg/cqaUXGm",
-                    "Join the Chorus Encore Discord community",
+                    n("Join the Chorus Encore Discord community"),
                 );
-                web_link(ui, None, "🌐 Encore", "https://www.enchor.us", "Chorus Encore, the chart search engine Rainbow is built on");
+                web_link(ui, None, "🌐 Encore", "https://www.enchor.us", n("Chorus Encore, the chart search engine Rainbow is built on"));
+                ui.separator();
+                self.language_picker(ui);
                 ui.separator();
                 if ui
-                    .selectable_label(self.show_log, format!("📜 Log ({})", self.log.len()))
-                    .on_hover_text("Show activity and errors")
+                    .selectable_label(self.show_log, tr!("📜 Log ({count})", count = self.log.len()))
+                    .on_hover_text(t("Show activity and errors"))
                     .clicked()
                 {
                     self.show_log = !self.show_log;
                 }
             });
         });
+    }
+
+    /// The interface language picker in the status bar. Each language is shown in itself.
+    fn language_picker(&mut self, ui: &mut egui::Ui) {
+        let languages = &self.languages;
+        let current = if self.settings.language == "auto" {
+            tr!("🌐 Auto ({language})", language = languages.iter().find(|l| l.code == i18n::system_language()).map_or("English", |l| l.name.as_str()))
+        } else {
+            format!("🌐 {}", languages.iter().find(|l| l.code == self.settings.language).map_or("English", |l| l.name.as_str()))
+        };
+        let mut picked = None;
+        egui::ComboBox::from_id_salt("language").selected_text(current).height(420.0).show_ui(ui, |ui| {
+            ui.set_min_width(220.0);
+            if ui.selectable_label(self.settings.language == "auto", t("Auto (system language)")).clicked() {
+                picked = Some("auto".to_owned());
+            }
+            ui.separator();
+            for lang in languages {
+                let label = if lang.name == lang.english_name { lang.name.clone() } else { format!("{}  ·  {}", lang.name, lang.english_name) };
+                if ui.selectable_label(self.settings.language == lang.code, label).clicked() {
+                    picked = Some(lang.code.clone());
+                }
+            }
+        })
+        .response
+        .on_hover_text(t("Language"));
+        if let Some(code) = picked {
+            self.settings.language = code;
+        }
     }
 
     /// Download progress, shown above the status bar while a download runs.
@@ -1246,13 +1304,13 @@ impl App {
         ui.add_space(4.0);
         ui.horizontal(|ui| {
             ui.strong(format!("⬇ {}", job.title));
-            ui.label(format!("{} / {} checked", job.checked, job.total));
-            ui.colored_label(theme::good(), format!("✔ {} downloaded", job.downloaded));
-            ui.weak(format!("{} already had", job.checked - job.downloaded - job.failed));
+            ui.label(tr!("{done} / {total} checked", done = job.checked, total = job.total));
+            ui.colored_label(theme::good(), tr!("✔ {count} downloaded", count = job.downloaded));
+            ui.weak(tr!("{count} already had", count = job.checked - job.downloaded - job.failed));
             if job.failed > 0 {
-                ui.colored_label(theme::bad(), format!("✖ {} failed", job.failed));
+                ui.colored_label(theme::bad(), tr!("✖ {count} failed", count = job.failed));
             }
-            if ui.small_button("⏹ Stop").clicked() {
+            if ui.small_button(t("⏹ Stop")).clicked() {
                 self.stop.store(true, Ordering::Relaxed);
             }
         });
@@ -1276,9 +1334,9 @@ impl App {
             .show_collapsible(ui, &mut self.show_log, |ui| {
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new(format!("📜  Log ({})", log.len())).strong());
+                    ui.label(RichText::new(tr!("📜 Log ({count})", count = log.len())).strong());
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.small_button("Copy all").on_hover_text("Copy the whole log").clicked() {
+                        if ui.small_button(t("Copy all")).on_hover_text(t("Copy the whole log")).clicked() {
                             ui.ctx().copy_text(log.join("\n"));
                         }
                     });
@@ -1377,31 +1435,39 @@ impl App {
     fn active_filters(&mut self, ui: &mut egui::Ui) {
         let f = &self.filters;
         let mut chips: Vec<(String, Box<dyn Fn(&mut Filters)>)> = Vec::new();
-        for (k, t) in f.text.iter().enumerate() {
-            if !t.value.trim().is_empty() {
-                let how = if t.exclude { "is not" } else if t.exact { "is" } else { "contains" };
-                chips.push((format!("{} {how} \"{}\"", TEXT_FIELDS[k], t.value.trim()), Box::new(move |f| f.text[k] = Default::default())));
+        for (k, field) in f.text.iter().enumerate() {
+            if !field.value.trim().is_empty() {
+                let (name, value) = (t(TEXT_FIELDS[k]), field.value.trim());
+                let text = if field.exclude {
+                    tr!("{field} is not \"{value}\"", field = name, value = value)
+                } else if field.exact {
+                    tr!("{field} is \"{value}\"", field = name, value = value)
+                } else {
+                    tr!("{field} contains \"{value}\"", field = name, value = value)
+                };
+                chips.push((text, Box::new(move |f| f.text[k] = Default::default())));
             }
         }
         if let Some(i) = f.instrument {
-            chips.push((format!("{} {}", instrument_icon(i), INSTRUMENTS[i as usize].1), Box::new(|f| f.instrument = None)));
+            chips.push((format!("{} {}", instrument_icon(i), t(INSTRUMENTS[i as usize].1)), Box::new(|f| f.instrument = None)));
         }
         if let Some(d) = f.difficulty {
-            chips.push((DIFFICULTIES[d as usize].1.to_owned(), Box::new(|f| f.difficulty = None)));
+            chips.push((t(DIFFICULTIES[d as usize].1), Box::new(|f| f.difficulty = None)));
         }
         if let Some(g) = &f.game {
             chips.push((format!("🏆 {}", games::game_name(g)), Box::new(|f| f.game = None)));
         } else if f.legacy {
-            chips.push(("🏆 Legacy".to_owned(), Box::new(|f| f.legacy = false)));
+            chips.push((t("🏆  Legacy"), Box::new(|f| f.legacy = false)));
         }
         for (label, range, clear) in [
-            ("Length", &f.length_min, (|f: &mut Filters| f.length_min = Range::default()) as fn(&mut Filters)),
-            ("Intensity", &f.intensity, |f: &mut Filters| f.intensity = Range::default()),
-            ("Avg NPS", &f.avg_nps, |f: &mut Filters| f.avg_nps = Range::default()),
-            ("Max NPS", &f.max_nps, |f: &mut Filters| f.max_nps = Range::default()),
-            ("Year", &f.year, |f: &mut Filters| f.year = Range::default()),
+            (n("Length"), &f.length_min, (|f: &mut Filters| f.length_min = Range::default()) as fn(&mut Filters)),
+            (n("Intensity"), &f.intensity, |f: &mut Filters| f.intensity = Range::default()),
+            (n("Avg NPS"), &f.avg_nps, |f: &mut Filters| f.avg_nps = Range::default()),
+            (n("Max NPS"), &f.max_nps, |f: &mut Filters| f.max_nps = Range::default()),
+            (n("Year"), &f.year, |f: &mut Filters| f.year = Range::default()),
         ] {
             let (min, max) = (range.min.trim(), range.max.trim());
+            let label = t(label);
             let text = match (min.is_empty(), max.is_empty()) {
                 (true, true) => continue,
                 _ if min == max => format!("{label} {min}"),
@@ -1413,15 +1479,15 @@ impl App {
         }
         for (k, (label, _, _)) in TOGGLES.iter().enumerate() {
             if let Some(want) = f.toggles[k] {
-                let text = if want { format!("✔ {label}") } else { format!("✖ No {}", label.to_lowercase()) };
+                let text = if want { format!("✔ {}", t(label)) } else { tr!("✖ Not {feature}", feature = t(label)) };
                 chips.push((text, Box::new(move |f| f.toggles[k] = None)));
             }
         }
         if !f.modified_after.trim().is_empty() {
-            chips.push((format!("Modified after {}", f.modified_after.trim()), Box::new(|f| f.modified_after.clear())));
+            chips.push((tr!("Modified after {date}", date = f.modified_after.trim()), Box::new(|f| f.modified_after.clear())));
         }
         if !f.hash.trim().is_empty() || !f.track_hash.trim().is_empty() {
-            chips.push(("Hash".to_owned(), Box::new(|f| {
+            chips.push((t("Hash"), Box::new(|f| {
                 f.hash.clear();
                 f.track_hash.clear();
                 f.track_md5s = None;
@@ -1432,20 +1498,20 @@ impl App {
         }
         ui.add_space(4.0);
         ui.horizontal_wrapped(|ui| {
-            if !self.history.is_empty() && ui.button("← Back").on_hover_text("Go back to the previous search").clicked() {
+            if !self.history.is_empty() && ui.button(t("← Back")).on_hover_text(t("Go back to the previous search")).clicked() {
                 self.filters = self.history.pop().unwrap_or_default();
                 return;
             }
             let mut remove = None;
             for (k, (text, _)) in chips.iter().enumerate() {
-                if theme::chip(ui, &format!("{text}  ✖"), theme::accent_hover()).on_hover_text("Remove this filter").clicked() {
+                if theme::chip(ui, &format!("{text}  ✖"), theme::accent_hover()).on_hover_text(t("Remove this filter")).clicked() {
                     remove = Some(k);
                 }
             }
             if let Some(k) = remove {
                 (chips[k].1)(&mut self.filters);
             }
-            if chips.len() > 1 && ui.small_button("Clear all").clicked() {
+            if chips.len() > 1 && ui.small_button(t("Clear all")).clicked() {
                 let keep = (self.filters.sort, self.filters.descending);
                 self.filters = Filters { sort: keep.0, descending: keep.1, ..Default::default() };
             }
@@ -1454,28 +1520,31 @@ impl App {
 
     fn toolbar_left(&mut self, ui: &mut egui::Ui, wide: bool) {
         let count = self.results.len();
-        ui.label(RichText::new(format!("{count} results")).strong());
+        ui.label(RichText::new(tr!("{count} results", count = count)).strong());
         if !self.cat_complete {
             if self.live_searching {
                 ui.spinner();
             }
-            let total = self.cat_total.map_or(String::new(), |t| format!(" of ~{t}"));
-            ui.weak(format!("(searching {} charts{total} so far)", self.charts.len()));
+            let searching = match self.cat_total {
+                Some(total) => tr!("(searching {count} of ~{total} charts so far)", count = self.charts.len(), total = total),
+                None => tr!("(searching {count} charts so far)", count = self.charts.len()),
+            };
+            ui.weak(searching);
         }
         ui.separator();
-        let tip = "Tip: Shift+click selects a range, Ctrl+click adds or removes one";
-        if ui.button("☑ Select all").on_hover_text(tip).clicked() {
+        let tip = t("Tip: Shift+click selects a range, Ctrl+click adds or removes one");
+        if ui.button(t("☑ Select all")).on_hover_text(tip).clicked() {
             self.selected = self.results.iter().map(|&i| self.charts[i].md5.clone()).collect();
         }
-        if ui.button("☐ Clear").clicked() {
+        if ui.button(t("☐ Clear")).clicked() {
             self.selected.clear();
         }
         if wide {
-            ui.weak("Shift/Ctrl+click to select several");
+            ui.weak(t("Shift/Ctrl+click to select several"));
         }
         ui.separator();
-        for (d, icon, tip) in [(Density::Compact, "☰", "Compact rows"), (Density::Default, "▤", "Default rows"), (Density::Large, "▦", "Large rows with bigger covers")] {
-            if ui.selectable_label(self.settings.density == d, icon).on_hover_text(tip).clicked() {
+        for (d, icon, tip) in [(Density::Compact, "☰", n("Compact rows")), (Density::Default, "▤", n("Default rows")), (Density::Large, "▦", n("Large rows with bigger covers"))] {
+            if ui.selectable_label(self.settings.density == d, icon).on_hover_text(t(tip)).clicked() {
                 self.settings.density = d;
                 self.settings.cover_size = d.cover_size();
             }
@@ -1487,23 +1556,23 @@ impl App {
         let busy = self.job.is_some();
         let count = self.results.len();
         let resp = ui
-            .add_enabled(!busy && self.cat_complete, egui::Button::new("⬇ Entire library"))
-            .on_hover_text("Download every chart on Encore")
-            .on_disabled_hover_text("Available once the catalogue has finished downloading");
+            .add_enabled(!busy && self.cat_complete, egui::Button::new(t("⬇ Entire library")))
+            .on_hover_text(t("Download every chart on Encore"))
+            .on_disabled_hover_text(t("Available once the catalogue has finished downloading"));
         if resp.clicked() {
             let charts = self.charts.clone();
-            self.request_download("Entire Encore library".to_owned(), charts);
+            self.request_download(t("Entire Encore library"), charts);
         }
-        let resp = ui.add_enabled(!busy && count > 0, egui::Button::new(format!("⬇ All {count} results")));
+        let resp = ui.add_enabled(!busy && count > 0, egui::Button::new(tr!("⬇ All {count} results", count = count)));
         if resp.clicked() {
             let charts: Vec<Chart> = self.results.iter().map(|&i| self.charts[i].clone()).collect();
-            self.request_download("All current results".to_owned(), charts);
+            self.request_download(t("All current results"), charts);
         }
         let n = self.selected.len();
-        if ui.add_enabled(!busy && n > 0, theme::download_button(format!("⬇ Download selected ({n})"))).clicked() {
+        if ui.add_enabled(!busy && n > 0, theme::download_button(tr!("⬇ Download selected ({count})", count = n))).clicked() {
             let charts = self.selected_charts();
             self.selected.clear();
-            self.request_download(format!("{} selected chart(s)", charts.len()), charts);
+            self.request_download(tr!("{count} selected chart(s)", count = charts.len()), charts);
         }
     }
 
@@ -1541,6 +1610,7 @@ impl App {
         let mut table_ui = ui.new_child(egui::UiBuilder::new().max_rect(table_rect));
         // Keep rows from spilling under the scroll bar.
         table_ui.set_clip_rect(table_rect.intersect(ui.clip_rect()));
+        table_ui.style_mut().interaction.selectable_labels = false;
         // egui_extras draws the column resize bars with these strokes; make them easier to see and grab.
         let w = &mut table_ui.visuals_mut().widgets;
         w.noninteractive.bg_stroke.width = 3.0;
@@ -1620,7 +1690,7 @@ impl App {
                         h.col(|ui| {
                             ui.add_space(9.0);
                             let mut all = all_selected;
-                            let tip = if all_selected { "Deselect all results" } else { "Select all results" };
+                            let tip = if all_selected { t("Deselect all results") } else { t("Select all results") };
                             if theme::checkbox_ex(ui, &mut all, "", any_selected && !all_selected).on_hover_text(tip).clicked() {
                                 toggle_all = true;
                             }
@@ -1629,30 +1699,30 @@ impl App {
                     }
                     let (title, key) = match col {
                         Col::Check | Col::Cover => ("", None),
-                        Col::Tags => ("Tags", None),
-                        Col::Name => ("Name", Some(SortKey::Name)),
-                        Col::Artist => ("Artist", Some(SortKey::Artist)),
-                        Col::Album => ("Album", Some(SortKey::Album)),
-                        Col::Genre => ("Genre", Some(SortKey::Genre)),
-                        Col::Year => ("Year", Some(SortKey::Year)),
-                        Col::Charter => ("Charter", Some(SortKey::Charter)),
-                        Col::Length => ("Length", Some(SortKey::Length)),
-                        Col::Difficulty => ("Difficulty", Some(SortKey::Difficulty)),
-                        Col::Uploaded => ("Uploaded", Some(SortKey::Uploaded)),
+                        Col::Tags => (n("Tags"), None),
+                        Col::Name => (n("Name"), Some(SortKey::Name)),
+                        Col::Artist => (n("Artist"), Some(SortKey::Artist)),
+                        Col::Album => (n("Album"), Some(SortKey::Album)),
+                        Col::Genre => (n("Genre"), Some(SortKey::Genre)),
+                        Col::Year => (n("Year"), Some(SortKey::Year)),
+                        Col::Charter => (n("Charter"), Some(SortKey::Charter)),
+                        Col::Length => (n("Length"), Some(SortKey::Length)),
+                        Col::Difficulty => (n("Difficulty"), Some(SortKey::Difficulty)),
+                        Col::Uploaded => (n("Uploaded"), Some(SortKey::Uploaded)),
                     };
                     h.col(|ui| {
                         ui.add_space(8.0);
                         let Some(key) = key else {
-                            ui.strong(title);
+                            ui.strong(t(title));
                             return;
                         };
                         let active = sort == key;
                         let arrow = if active { if desc { " ⏷" } else { " ⏶" } } else { "" };
-                        let mut text = RichText::new(format!("{title}{arrow}")).strong();
+                        let mut text = RichText::new(format!("{}{arrow}", t(title))).strong();
                         if active {
                             text = text.color(theme::accent_hover());
                         }
-                        if ui.add(egui::Button::new(text).frame(false)).on_hover_text("Sort").clicked() {
+                        if ui.add(egui::Button::new(text).frame(false)).on_hover_text(t("Sort")).clicked() {
                             sort_click = Some(key);
                         }
                     });
@@ -1685,35 +1755,35 @@ impl App {
                             }
                             Col::Artist => {
                                 if let Some(a) = &c.artist
-                                    && link(ui, RichText::new(a), "Show all songs by this artist")
+                                    && link(ui, RichText::new(a), n("Show all songs by this artist"))
                                 {
                                     nav = Some(Nav::Text(1, a.clone(), true));
                                 }
                             }
                             Col::Album => {
                                 if let Some(a) = &c.album
-                                    && link(ui, RichText::new(a).weak(), "Show this album")
+                                    && link(ui, RichText::new(a).weak(), n("Show this album"))
                                 {
                                     nav = Some(Nav::Album { artist: c.artist.clone(), album: a.clone() });
                                 }
                             }
                             Col::Genre => {
                                 if let Some(g) = &c.genre
-                                    && theme::chip(ui, g, tag_color(g)).on_hover_text("Show this genre").clicked()
+                                    && theme::chip(ui, g, tag_color(g)).on_hover_text(t("Show this genre")).clicked()
                                 {
                                     nav = Some(Nav::Text(3, g.clone(), true));
                                 }
                             }
                             Col::Year => {
                                 if let Some(y) = &c.year
-                                    && link(ui, RichText::new(y).weak(), "Show songs from this year")
+                                    && link(ui, RichText::new(y).weak(), n("Show songs from this year"))
                                 {
                                     nav = Some(Nav::Text(4, y.clone(), true));
                                 }
                             }
                             Col::Charter => {
                                 if let Some(ch) = &c.charter
-                                    && link(ui, RichText::new(ch), "Show everything charted by this charter")
+                                    && link(ui, RichText::new(ch), n("Show everything charted by this charter"))
                                 {
                                     nav = Some(Nav::Text(5, ch.clone(), false));
                                 }
@@ -1880,7 +1950,7 @@ impl App {
             ui.add_space(8.0);
             ui.horizontal(|ui| {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
-                    if ui.small_button("✖").on_hover_text("Close").clicked() {
+                    if ui.small_button("✖").on_hover_text(t("Close")).clicked() {
                         self.detail = None;
                     }
                 });
@@ -1888,18 +1958,18 @@ impl App {
             let size = ui.available_width().min(320.0);
             ui.vertical_centered(|ui| cover(ui, &mut self.covers, c.art.as_deref(), size, covers::LARGE));
             ui.add_space(8.0);
-            let title = ui.label(RichText::new(c.name.as_deref().unwrap_or("Unknown")).heading().strong());
-            copy_menu(&title, &[("Copy song name", c.name.clone().unwrap_or_default()), ("Copy \"Artist - Song\"", c.title())]);
+            let title = ui.label(RichText::new(c.name.clone().unwrap_or_else(|| t("Unknown"))).heading().strong());
+            copy_menu(&title, &[(n("Copy song name"), c.name.clone().unwrap_or_default()), (n("Copy \"Artist - Song\""), c.title())]);
             let mut nav = None;
             if let Some(a) = &c.artist
-                && link(ui, RichText::new(a).size(16.0).color(theme::accent()), "Show all songs by this artist")
+                && link(ui, RichText::new(a).size(16.0).color(theme::accent()), n("Show all songs by this artist"))
             {
                 nav = Some(Nav::Text(1, a.clone(), true));
             }
             ui.horizontal_wrapped(|ui| {
                 ui.spacing_mut().item_spacing.x = 4.0;
                 if let Some(a) = &c.album
-                    && link(ui, RichText::new(a).weak(), "Show this album")
+                    && link(ui, RichText::new(a).weak(), n("Show this album"))
                 {
                     nav = Some(Nav::Album { artist: c.artist.clone(), album: a.clone() });
                 }
@@ -1907,7 +1977,7 @@ impl App {
                     if c.album.is_some() {
                         ui.weak("·");
                     }
-                    if link(ui, RichText::new(y).weak(), "Show songs from this year") {
+                    if link(ui, RichText::new(y).weak(), n("Show songs from this year")) {
                         nav = Some(Nav::Text(4, y.clone(), true));
                     }
                 }
@@ -1915,17 +1985,17 @@ impl App {
             ui.add_space(6.0);
             ui.horizontal_wrapped(|ui| {
                 if let Some(g) = games::game_key(c.icon.as_deref())
-                    && theme::chip(ui, &format!("🏆 {}", games::game_name(&g)), theme::warn()).on_hover_text("Show this game's charts").clicked()
+                    && theme::chip(ui, &format!("🏆 {}", games::game_name(&g)), theme::warn()).on_hover_text(t("Show this game's charts")).clicked()
                 {
                     nav = Some(Nav::Game(g));
                 }
                 if let Some(g) = &c.genre
-                    && theme::chip(ui, g, tag_color(g)).on_hover_text("Show this genre").clicked()
+                    && theme::chip(ui, g, tag_color(g)).on_hover_text(t("Show this genre")).clicked()
                 {
                     nav = Some(Nav::Text(3, g.clone(), true));
                 }
                 if let Some(ch) = &c.charter
-                    && theme::chip(ui, &format!("✏ {ch}"), theme::RAINBOW[4]).on_hover_text("Show everything charted by this charter").clicked()
+                    && theme::chip(ui, &format!("✏ {ch}"), theme::RAINBOW[4]).on_hover_text(t("Show everything charted by this charter")).clicked()
                 {
                     nav = Some(Nav::Text(5, ch.clone(), false));
                 }
@@ -1945,17 +2015,17 @@ impl App {
             ui.horizontal(|ui| {
                 if downloaded {
                     let good = theme::good();
-                    let button = egui::Button::new(RichText::new("📂  Show in folder").strong().color(good))
+                    let button = egui::Button::new(RichText::new(t("📂  Show in folder")).strong().color(good))
                         .fill(good.linear_multiply(0.15))
                         .stroke(egui::Stroke::new(1.0, good.linear_multiply(0.7)))
                         .min_size(vec2(half, 34.0));
-                    reveal_it = ui.add(button).on_hover_text("Downloaded ✔  Open it in your file manager").clicked();
+                    reveal_it = ui.add(button).on_hover_text(t("Downloaded ✔  Open it in your file manager")).clicked();
                 } else {
-                    download = ui.add_enabled(!busy, theme::download_button("⬇  Download").min_size(vec2(half, 34.0))).clicked();
+                    download = ui.add_enabled(!busy, theme::download_button(t("⬇  Download")).min_size(vec2(half, 34.0))).clicked();
                 }
                 open_preview = ui
-                    .add(egui::Button::new(RichText::new("▶  Preview").size(14.5).strong()).min_size(vec2(half, 34.0)))
-                    .on_hover_text("Watch the notes fall, like in game (no audio)")
+                    .add(egui::Button::new(RichText::new(t("▶  Preview")).size(14.5).strong()).min_size(vec2(half, 34.0)))
+                    .on_hover_text(t("Watch the notes fall, like in game (no audio)"))
                     .clicked();
             });
             if download {
@@ -1969,7 +2039,7 @@ impl App {
             }
 
             ui.add_space(12.0);
-            ui.label(RichText::new("Instruments").strong());
+            ui.label(RichText::new(t("Instruments")).strong());
             // One full-width band per instrument, alternating shades. Two lines, so the note
             // count and NPS never get cut off however narrow the panel is.
             let mut row = 0;
@@ -1989,45 +2059,45 @@ impl App {
                     .show(ui, |ui| {
                         ui.set_width(ui.available_width());
                         ui.horizontal(|ui| {
-                            if link_ex(ui, RichText::new(format!("{}  {name}", instrument_icon(k as u8))).strong(), "Show charts for this instrument", false) {
+                            if link_ex(ui, RichText::new(format!("{}  {}", instrument_icon(k as u8), t(name))).strong(), n("Show charts for this instrument"), false) {
                                 nav = Some(Nav::Instrument(k as u8));
                             }
                             if d >= 0 {
                                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                     let resp = ui.add(egui::Label::new(theme::difficulty_dots(d)).sense(Sense::click()));
-                                    if resp.on_hover_text(format!("Intensity {d}: show {name} charts at this intensity")).clicked() {
+                                    if resp.on_hover_text(tr!("Intensity {level}: show {instrument} charts at this intensity", level = d, instrument = t(name))).clicked() {
                                         nav = Some(Nav::Difficulty(k as u8, d));
                                     }
                                 });
                             }
                         });
                         if let Some(s) = notes {
-                            ui.label(RichText::new(format!("{} notes  ·  {:.0} max NPS", s.n, s.nps)).size(12.5).weak());
+                            ui.label(RichText::new(tr!("{notes} notes  ·  {nps} max NPS", notes = s.n, nps = format!("{:.0}", s.nps))).size(12.5).weak());
                         }
                     });
             }
 
             ui.spacing_mut().item_spacing.y = 6.0;
             ui.add_space(10.0);
-            ui.label(RichText::new("Features").strong());
+            ui.label(RichText::new(t("Features")).strong());
             ui.horizontal_wrapped(|ui| {
                 let any = feature_tags(ui, &c, true, &mut nav);
                 if !any {
-                    ui.weak("None");
+                    ui.weak(t("None"));
                 }
             });
 
             ui.add_space(10.0);
             ui.horizontal(|ui| {
-                ui.weak("MD5");
+                ui.weak(t("MD5"));
                 // The copy button sits at the right edge; the hash takes what's left and
                 // shortens with "…" if needed (right-click or hover shows it in full).
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.small_button("📋").on_hover_text("Copy MD5").clicked() {
+                    if ui.small_button("📋").on_hover_text(t("Copy MD5")).clicked() {
                         ui.ctx().copy_text(c.md5.clone());
                     }
                     let hash = ui.add(egui::Label::new(RichText::new(&c.md5).monospace().small()).truncate());
-                    copy_menu(&hash.on_hover_text(&c.md5), &[("Copy MD5", c.md5.clone())]);
+                    copy_menu(&hash.on_hover_text(&c.md5), &[(n("Copy MD5"), c.md5.clone())]);
                 });
             });
             ui.add_space(8.0);
@@ -2043,10 +2113,12 @@ impl App {
         };
         let mut open = true;
         let mut decision = None;
-        egui::Window::new("⬇ Start bulk download?")
+        egui::Window::new(t("⬇ Start bulk download?"))
             .collapsible(false)
             .resizable(false)
-            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .order(egui::Order::Foreground)
+            .pivot(egui::Align2::CENTER_CENTER)
+            .fixed_pos(ctx.content_rect().center())
             .open(&mut open)
             .show(ctx, |ui| {
                 let have = {
@@ -2055,28 +2127,28 @@ impl App {
                 };
                 let todo = confirm.charts.len() - have;
                 ui.label(RichText::new(&confirm.title).heading());
-                ui.label(format!("{} charts: {have} already downloaded, {todo} to go.", confirm.charts.len()));
-                ui.weak("You can stop at any time; next time it picks up where it left off.");
+                ui.label(tr!("{count} charts: {have} already downloaded, {todo} to go.", count = confirm.charts.len(), have = have, todo = todo));
+                ui.weak(t("You can stop at any time; next time it picks up where it left off."));
                 ui.add_space(8.0);
-                theme::checkbox(ui, &mut self.settings.video, "🎬 Download video backgrounds (much larger)");
+                theme::checkbox(ui, &mut self.settings.video, &t("🎬 Download video backgrounds (much larger)"));
                 ui.horizontal(|ui| {
-                    ui.label("Format:");
+                    ui.label(t("Format:"));
                     ui.radio_value(&mut self.settings.format, DownloadFormat::Sng, ".sng");
-                    ui.radio_value(&mut self.settings.format, DownloadFormat::Folder, "Chart Folder");
+                    ui.radio_value(&mut self.settings.format, DownloadFormat::Folder, t("Chart Folder"));
                 });
                 ui.horizontal(|ui| {
-                    ui.label("Wait between downloads:");
+                    ui.label(t("Wait between downloads:"));
                     ui.add(egui::Slider::new(&mut self.settings.delay_secs, 0.5..=10.0).suffix(" s"));
                 });
                 let hours = todo as f32 * (self.settings.delay_secs + 1.0) / 3600.0;
-                ui.weak(format!("Roughly {hours:.0}+ hours at that pace (plus download time)."));
-                ui.weak("Encore is donation-funded; please keep the delay reasonable.");
+                ui.weak(tr!("Roughly {hours}+ hours at that pace (plus download time).", hours = format!("{hours:.0}")));
+                ui.weak(t("Encore is donation-funded; please keep the delay reasonable."));
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
-                    if ui.add(theme::primary("Start")).clicked() {
+                    if ui.add(theme::primary(t("Start"))).clicked() {
                         decision = Some(true);
                     }
-                    if ui.button("Cancel").clicked() {
+                    if ui.button(t("Cancel")).clicked() {
                         decision = Some(false);
                     }
                 });
@@ -2136,7 +2208,7 @@ impl App {
                         ui.ctx().open_url(egui::OpenUrl::new_tab(RENZORA_URL));
                     }
                 }
-                ui.label(RichText::new("Created by Renzora Studios").strong().size(15.0));
+                ui.label(RichText::new(t("Created by Renzora Studios")).strong().size(15.0));
                 ui.weak(concat!("Rainbow v", env!("CARGO_PKG_VERSION")));
             });
             ui.add_space(12.0);
@@ -2160,8 +2232,11 @@ impl App {
         if self.settings.dir != self.saved_settings.dir {
             self.manifest = Arc::new(Mutex::new(Manifest::load(&self.settings.dir)));
         }
-        if self.settings.font != self.saved_settings.font {
-            theme::install_fonts(ctx, self.settings.font);
+        if self.settings.language != self.saved_settings.language {
+            i18n::set_language(&self.settings.language);
+        }
+        if self.settings.font != self.saved_settings.font || self.settings.language != self.saved_settings.language {
+            theme::install_fonts(ctx, self.settings.font, &i18n::current());
         }
         if self.settings.theme != self.saved_settings.theme
             || self.settings.zoom != self.saved_settings.zoom
@@ -2177,7 +2252,7 @@ impl App {
 
 /// "Created by Renzora Studios" with the studio's logo; links to its GitHub.
 fn credit(ui: &mut egui::Ui, logo: Option<&egui::TextureHandle>, height: f32) {
-    let text = RichText::new("Created by Renzora Studios").size(13.0).color(ui.visuals().weak_text_color());
+    let text = RichText::new(t("Created by Renzora Studios")).size(13.0).color(ui.visuals().weak_text_color());
     let resp = match logo {
         Some(tex) => {
             let image = egui::Image::new(tex).fit_to_exact_size(vec2(height * 110.0 / 128.0, height));
@@ -2198,7 +2273,7 @@ fn web_link(ui: &mut egui::Ui, icon: Option<egui::ImageSource<'static>>, text: &
         Some(icon) => egui::Button::image_and_text(egui::Image::new(icon).fit_to_exact_size(vec2(15.0, 15.0)).tint(color), label),
         None => egui::Button::new(label),
     };
-    let resp = ui.add(button.frame(false)).on_hover_text(format!("{tip}\n{url}"));
+    let resp = ui.add(button.frame(false)).on_hover_text(format!("{}\n{url}", t(tip)));
     if resp.clicked() {
         ui.ctx().open_url(egui::OpenUrl::new_tab(url));
     }
@@ -2252,7 +2327,8 @@ fn segmented<T: PartialEq + Copy>(ui: &mut egui::Ui, value: &mut T, options: &[(
     // Laid out right to left by the caller, so add the options in reverse.
     for (option, label) in options.iter().rev() {
         let on = *value == *option;
-        let text = if on { RichText::new(*label).size(14.5).color(theme::on_accent()).strong() } else { RichText::new(*label).size(14.5) };
+        let label = t(label);
+        let text = if on { RichText::new(label).size(14.5).color(theme::on_accent()).strong() } else { RichText::new(label).size(14.5) };
         let fill = if on { theme::accent() } else { ui.visuals().widgets.inactive.bg_fill };
         let button = egui::Button::new(text).fill(fill).corner_radius(CornerRadius::same(14)).min_size(vec2(0.0, 32.0));
         if ui.add(button).clicked() && !on {
@@ -2265,14 +2341,14 @@ fn segmented<T: PartialEq + Copy>(ui: &mut egui::Ui, value: &mut T, options: &[(
 
 fn library_card(ui: &mut egui::Ui, s: &mut Settings, width: f32, busy: bool, example: Option<&Chart>, actions: &mut SettingsActions) {
     let _ = actions;
-    settings_card(ui, width, "📁  Chart library", "Where Rainbow puts the charts it downloads.", |ui| {
-        setting_row(ui, "Songs folder", "Point this at your Clone Hero or YARG songs folder.", |ui| {
-            if ui.add_enabled(!busy, theme::primary("Choose…").min_size(vec2(0.0, 32.0))).clicked()
+    settings_card(ui, width, &t("📁  Chart library"), &t("Where Rainbow puts the charts it downloads."), |ui| {
+        setting_row(ui, &t("Songs folder"), &t("Point this at your Clone Hero or YARG songs folder."), |ui| {
+            if ui.add_enabled(!busy, theme::primary(t("Choose…")).min_size(vec2(0.0, 32.0))).clicked()
                 && let Some(dir) = rfd::FileDialog::new().set_directory(&s.dir).pick_folder()
             {
                 s.dir = dir;
             }
-            if ui.add(egui::Button::new(RichText::new("📂 Open").size(14.5)).min_size(vec2(0.0, 32.0))).clicked() {
+            if ui.add(egui::Button::new(RichText::new(t("📂 Open")).size(14.5)).min_size(vec2(0.0, 32.0))).clicked() {
                 open_folder(&s.dir);
             }
         });
@@ -2284,10 +2360,7 @@ fn library_card(ui: &mut egui::Ui, s: &mut Settings, width: f32, busy: bool, exa
                 ui.set_width(ui.available_width());
                 ui.add(egui::Label::new(RichText::new(s.dir.display().to_string()).monospace().size(13.5)).truncate());
             });
-        setting_row(
-            ui,
-            "Chart folder name",
-            "Use {name} {artist} {album} {genre} {year} {charter}, and / for subfolders.",
+        setting_row(ui, &t("Chart folder name"), &t("Use {name} {artist} {album} {genre} {year} {charter}, and / for subfolders."),
             |_| {},
         );
         let resp = ui.add(
@@ -2304,39 +2377,39 @@ fn library_card(ui: &mut egui::Ui, s: &mut Settings, width: f32, busy: bool, exa
 }
 
 fn downloads_card(ui: &mut egui::Ui, s: &mut Settings, width: f32, busy: bool, actions: &mut SettingsActions) {
-    settings_card(ui, width, "⬇  Downloads", "How charts are saved, and how politely bulk downloads run.", |ui| {
+    settings_card(ui, width, &t("⬇  Downloads"), &t("How charts are saved, and how politely bulk downloads run."), |ui| {
         ui.add_enabled_ui(!busy, |ui| {
-            setting_row(ui, "Format", ".sng is one file per chart. Chart Folder unpacks it with song.ini.", |ui| {
-                segmented(ui, &mut s.format, &[(DownloadFormat::Sng, ".sng"), (DownloadFormat::Folder, "Chart Folder")]);
+            setting_row(ui, &t("Format"), &t(".sng is one file per chart. Chart Folder unpacks it with song.ini."), |ui| {
+                segmented(ui, &mut s.format, &[(DownloadFormat::Sng, ".sng"), (DownloadFormat::Folder, n("Chart Folder"))]);
             });
-            setting_row(ui, "Video backgrounds", "Much larger downloads. Off gets the no-video version.", |ui| {
+            setting_row(ui, &t("Video backgrounds"), &t("Much larger downloads. Off gets the no-video version."), |ui| {
                 theme::checkbox(ui, &mut s.video, "");
             });
         });
-        setting_row(ui, "Wait between bulk downloads", "Encore is donation-funded, so please keep this reasonable.", |ui| {
+        setting_row(ui, &t("Wait between bulk downloads"), &t("Encore is donation-funded, so please keep this reasonable."), |ui| {
             ui.add(egui::Slider::new(&mut s.delay_secs, 0.5..=10.0).suffix(" s"));
         });
-        setting_row(ui, "Convert Rock Band songs automatically", "CON files (e.g. from RhythmVerse) in your songs folder become Clone Hero charts. You can also drop them onto the window.", |ui| {
+        setting_row(ui, &t("Convert Rock Band songs automatically"), &t("CON files (e.g. from RhythmVerse) in your songs folder become Clone Hero charts. You can also drop them onto the window."), |ui| {
             theme::checkbox(ui, &mut s.auto_convert, "");
         });
-        setting_row(ui, "Extract .zip files automatically", "Unpack zips that appear in your songs folder (e.g. from other sites).", |ui| {
+        setting_row(ui, &t("Extract .zip files automatically"), &t("Unpack zips that appear in your songs folder (e.g. from other sites)."), |ui| {
             theme::checkbox(ui, &mut s.auto_extract, "");
         });
         ui.add_enabled_ui(s.auto_extract || s.auto_convert, |ui| {
-            let about = format!("Otherwise they're moved to {} or {} in your songs folder.", unzip::DONE_DIR, import::CONVERTED_DIR);
-            setting_row(ui, "Delete originals after processing", &about, |ui| {
+            let about = tr!("Otherwise they're moved to {zips} or {cons} in your songs folder.", zips = unzip::DONE_DIR, cons = import::CONVERTED_DIR);
+            setting_row(ui, &t("Delete originals after processing"), &about, |ui| {
                 theme::checkbox(ui, &mut s.delete_zips, "");
             });
         });
-        if ui.add(egui::Button::new(RichText::new("📦  Process songs folder now").size(14.5)).min_size(vec2(0.0, 32.0))).clicked() {
+        if ui.add(egui::Button::new(RichText::new(t("📦  Process songs folder now")).size(14.5)).min_size(vec2(0.0, 32.0))).clicked() {
             actions.extract_now = true;
         }
     });
 }
 
 fn appearance_card(ui: &mut egui::Ui, s: &mut Settings, width: f32) {
-    settings_card(ui, width, "🎨  Appearance", "Theme, size and what the results table shows.", |ui| {
-        setting_row(ui, "Theme", "Colours for the whole app.", |_| {});
+    settings_card(ui, width, &t("🎨  Appearance"), &t("Theme, size and what the results table shows."), |ui| {
+        setting_row(ui, &t("Theme"), &t("Colours for the whole app."), |_| {});
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing = vec2(10.0, 10.0);
             for kind in theme::ThemeKind::ALL {
@@ -2345,34 +2418,34 @@ fn appearance_card(ui: &mut egui::Ui, s: &mut Settings, width: f32) {
                 }
             }
         });
-        setting_row(ui, "Zoom", "Makes everything bigger or smaller.", |ui| {
-            if ui.add(egui::Button::new(RichText::new("➕").size(15.0)).min_size(vec2(34.0, 32.0))).on_hover_text("Zoom in").clicked() {
+        setting_row(ui, &t("Zoom"), &t("Makes everything bigger or smaller."), |ui| {
+            if ui.add(egui::Button::new(RichText::new("➕").size(15.0)).min_size(vec2(34.0, 32.0))).on_hover_text(t("Zoom in")).clicked() {
                 s.zoom = (s.zoom + 0.1).min(2.5);
             }
             ui.label(RichText::new(format!("{:.0}%", s.zoom * 100.0)).size(15.0).strong());
-            if ui.add(egui::Button::new(RichText::new("➖").size(15.0)).min_size(vec2(34.0, 32.0))).on_hover_text("Zoom out").clicked() {
+            if ui.add(egui::Button::new(RichText::new("➖").size(15.0)).min_size(vec2(34.0, 32.0))).on_hover_text(t("Zoom out")).clicked() {
                 s.zoom = (s.zoom - 0.1).max(0.5);
             }
         });
-        setting_row(ui, "Row size", "Drag the cover column's edge to fine-tune.", |ui| {
-            if segmented(ui, &mut s.density, &[(Density::Compact, "Compact"), (Density::Default, "Default"), (Density::Large, "Large")]) {
+        setting_row(ui, &t("Row size"), &t("Drag the cover column's edge to fine-tune."), |ui| {
+            if segmented(ui, &mut s.density, &[(Density::Compact, n("Compact")), (Density::Default, n("Default")), (Density::Large, n("Large"))]) {
                 s.cover_size = s.density.cover_size();
             }
         });
-        setting_row(ui, "Table columns", "Columns also hide automatically when the window is narrow.", |_| {});
+        setting_row(ui, &t("Table columns"), &t("Columns also hide automatically when the window is narrow."), |_| {});
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing = vec2(18.0, 10.0);
             let c = &mut s.columns;
             for (on, label) in [
-                (&mut c.cover, "Cover"),
-                (&mut c.artist, "Artist"),
-                (&mut c.album, "Album"),
-                (&mut c.genre, "Genre"),
-                (&mut c.year, "Year"),
-                (&mut c.charter, "Charter"),
-                (&mut c.length, "Length"),
-                (&mut c.difficulty, "Difficulty"),
-                (&mut c.uploaded, "Upload Date"),
+                (&mut c.cover, n("Cover")),
+                (&mut c.artist, n("Artist")),
+                (&mut c.album, n("Album")),
+                (&mut c.genre, n("Genre")),
+                (&mut c.year, n("Year")),
+                (&mut c.charter, n("Charter")),
+                (&mut c.length, n("Length")),
+                (&mut c.difficulty, n("Difficulty")),
+                (&mut c.uploaded, n("Upload Date")),
             ] {
                 theme::checkbox(ui, on, label);
             }
@@ -2381,8 +2454,8 @@ fn appearance_card(ui: &mut egui::Ui, s: &mut Settings, width: f32) {
 }
 
 fn accessibility_card(ui: &mut egui::Ui, s: &mut Settings, width: f32, actions: &mut SettingsActions) {
-    settings_card(ui, width, "♿  Accessibility & text", "Fonts, colour vision, motion and keyboard control.", |ui| {
-        setting_row(ui, "Font", "Each option is shown in its own typeface.", |_| {});
+    settings_card(ui, width, &t("♿  Accessibility & text"), &t("Fonts, colour vision, motion and keyboard control."), |ui| {
+        setting_row(ui, &t("Font"), &t("Each option is shown in its own typeface."), |_| {});
         for font in theme::UiFont::ALL {
             let selected = s.font == font;
             let family = egui::FontFamily::Name(font.key().into());
@@ -2391,8 +2464,8 @@ fn accessibility_card(ui: &mut egui::Ui, s: &mut Settings, width: f32, actions: 
                 let clicked = theme::checkbox(ui, &mut on, "").clicked();
                 ui.vertical(|ui| {
                     ui.spacing_mut().item_spacing.y = 1.0;
-                    ui.label(RichText::new(font.name()).family(family.clone()).size(16.5));
-                    ui.label(RichText::new(font.about()).size(12.5).weak());
+                    ui.label(RichText::new(t(font.name())).family(family.clone()).size(16.5));
+                    ui.label(RichText::new(t(font.about())).size(12.5).weak());
                 });
                 clicked
             });
@@ -2400,60 +2473,60 @@ fn accessibility_card(ui: &mut egui::Ui, s: &mut Settings, width: f32, actions: 
                 s.font = font;
             }
         }
-        setting_row(ui, "Colour vision", "Swaps status and difficulty colours for ones that stay distinct. Icons and numbers always show the meaning too.", |ui| {
+        setting_row(ui, &t("Colour vision"), &t("Swaps status and difficulty colours for ones that stay distinct. Icons and numbers always show the meaning too."), |ui| {
             let options: Vec<(theme::ColorBlind, &str)> = theme::ColorBlind::ALL.iter().map(|c| (*c, c.name())).collect();
             segmented(ui, &mut s.color_blind, &options);
         });
-        setting_row(ui, "Reduce motion", "Turns off animations and smooth scrolling.", |ui| {
+        setting_row(ui, &t("Reduce motion"), &t("Turns off animations and smooth scrolling."), |ui| {
             theme::checkbox(ui, &mut s.reduce_motion, "");
         });
-        setting_row(ui, "High contrast", "Pure black and white with a bright accent. Pick it under Theme.", |ui| {
+        setting_row(ui, &t("High contrast"), &t("Pure black and white with a bright accent. Pick it under Theme."), |ui| {
             let mut on = s.theme == theme::ThemeKind::HighContrast;
             if theme::checkbox(ui, &mut on, "").changed() {
                 s.theme = if on { theme::ThemeKind::HighContrast } else { theme::ThemeKind::Midnight };
             }
         });
-        setting_row(ui, "Text size", "Zoom scales the whole app, text included.", |ui| {
-            if ui.add(egui::Button::new(RichText::new("A+").size(15.0)).min_size(vec2(38.0, 32.0))).on_hover_text("Bigger").clicked() {
+        setting_row(ui, &t("Text size"), &t("Zoom scales the whole app, text included."), |ui| {
+            if ui.add(egui::Button::new(RichText::new("A+").size(15.0)).min_size(vec2(38.0, 32.0))).on_hover_text(t("Bigger")).clicked() {
                 s.zoom = (s.zoom + 0.1).min(2.5);
             }
             ui.label(RichText::new(format!("{:.0}%", s.zoom * 100.0)).size(15.0).strong());
-            if ui.add(egui::Button::new(RichText::new("A−").size(15.0)).min_size(vec2(38.0, 32.0))).on_hover_text("Smaller").clicked() {
+            if ui.add(egui::Button::new(RichText::new("A−").size(15.0)).min_size(vec2(38.0, 32.0))).on_hover_text(t("Smaller")).clicked() {
                 s.zoom = (s.zoom - 0.1).max(0.5);
             }
         });
-        setting_row(ui, "Keyboard shortcuts", "Everything in Browse can be used from the keyboard.", |ui| {
-            if ui.add(egui::Button::new(RichText::new("⌨  Show (F1)").size(14.5)).min_size(vec2(0.0, 32.0))).clicked() {
+        setting_row(ui, &t("Keyboard shortcuts"), &t("Everything in Browse can be used from the keyboard."), |ui| {
+            if ui.add(egui::Button::new(RichText::new(t("⌨  Show (F1)")).size(14.5)).min_size(vec2(0.0, 32.0))).clicked() {
                 actions.show_shortcuts = true;
             }
         });
-        ui.label(RichText::new("Screen readers (Narrator, NVDA, JAWS, VoiceOver, Orca) can read Rainbow's buttons, fields, checkboxes and results through AccessKit.").size(12.5).weak());
+        ui.label(RichText::new(t("Screen readers (Narrator, NVDA, JAWS, VoiceOver, Orca) can read Rainbow's buttons, fields, checkboxes and results through AccessKit.")).size(12.5).weak());
     });
 }
 
 fn catalogue_card(ui: &mut egui::Ui, s: &mut Settings, width: f32, building: bool, actions: &mut SettingsActions) {
-    settings_card(ui, width, "📚  Catalogue", "Rainbow's local copy of Encore's chart list, for instant search.", |ui| {
+    settings_card(ui, width, &t("📚  Catalogue"), &t("Rainbow's local copy of Encore's chart list, for instant search."), |ui| {
         let size = std::fs::metadata(catalogue::path()).map(|m| m.len()).unwrap_or(0);
         ui.label(RichText::new(format!("{}  ·  {:.1} MB", catalogue::path().display(), size as f64 / 1_048_576.0)).size(13.0).weak());
-        setting_row(ui, "Check for new charts on startup", "The ⟳ button in the status bar works any time.", |ui| {
+        setting_row(ui, &t("Check for new charts on startup"), &t("The ⟳ button in the status bar works any time."), |ui| {
             let text = match s.refresh_after_hours {
-                None => "Never",
-                Some(0) => "Every launch",
-                Some(12) => "After 12 hours",
-                Some(24) => "After 1 day",
-                Some(168) => "After 1 week",
-                Some(_) => "Custom",
+                None => n("Never"),
+                Some(0) => n("Every launch"),
+                Some(12) => n("After 12 hours"),
+                Some(24) => n("After 1 day"),
+                Some(168) => n("After 1 week"),
+                Some(_) => n("Custom"),
             };
-            egui::ComboBox::from_id_salt("refresh").selected_text(RichText::new(text).size(14.5)).width(170.0).show_ui(ui, |ui| {
-                ui.selectable_value(&mut s.refresh_after_hours, Some(0), "Every launch");
-                ui.selectable_value(&mut s.refresh_after_hours, Some(12), "After 12 hours");
-                ui.selectable_value(&mut s.refresh_after_hours, Some(24), "After 1 day");
-                ui.selectable_value(&mut s.refresh_after_hours, Some(168), "After 1 week");
-                ui.selectable_value(&mut s.refresh_after_hours, None, "Never");
+            egui::ComboBox::from_id_salt("refresh").selected_text(RichText::new(t(text)).size(14.5)).width(170.0).show_ui(ui, |ui| {
+                ui.selectable_value(&mut s.refresh_after_hours, Some(0), t("Every launch"));
+                ui.selectable_value(&mut s.refresh_after_hours, Some(12), t("After 12 hours"));
+                ui.selectable_value(&mut s.refresh_after_hours, Some(24), t("After 1 day"));
+                ui.selectable_value(&mut s.refresh_after_hours, Some(168), t("After 1 week"));
+                ui.selectable_value(&mut s.refresh_after_hours, None, t("Never"));
             });
         });
-        setting_row(ui, "Rebuild from scratch", "Re-downloads the whole chart list (about 5 minutes).", |ui| {
-            if ui.add_enabled(!building, egui::Button::new(RichText::new("⟳ Rebuild").size(14.5)).min_size(vec2(0.0, 32.0))).clicked() {
+        setting_row(ui, &t("Rebuild from scratch"), &t("Re-downloads the whole chart list (about 5 minutes)."), |ui| {
+            if ui.add_enabled(!building, egui::Button::new(RichText::new(t("⟳ Rebuild")).size(14.5)).min_size(vec2(0.0, 32.0))).clicked() {
                 actions.rebuild = true;
             }
         });
@@ -2473,7 +2546,7 @@ fn theme_swatch(ui: &mut egui::Ui, kind: theme::ThemeKind, selected: bool) -> eg
     painter.rect_filled(pill, CornerRadius::same(6), pal.accent);
     let pill2 = egui::Rect::from_min_size(rect.min + vec2(56.0, 26.0), vec2(28.0, 12.0));
     painter.rect_filled(pill2, CornerRadius::same(6), pal.hover);
-    painter.text(rect.left_bottom() + vec2(10.0, -10.0), egui::Align2::LEFT_BOTTOM, kind.name(), egui::FontId::proportional(13.0), pal.text);
+    painter.text(rect.left_bottom() + vec2(10.0, -10.0), egui::Align2::LEFT_BOTTOM, t(kind.name()), egui::FontId::proportional(13.0), pal.text);
     let stroke = if selected {
         egui::Stroke::new(2.5, theme::accent())
     } else if resp.hovered() {
@@ -2482,7 +2555,7 @@ fn theme_swatch(ui: &mut egui::Ui, kind: theme::ThemeKind, selected: bool) -> eg
         egui::Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color)
     };
     painter.rect_stroke(rect, r, stroke, egui::StrokeKind::Inside);
-    resp.on_hover_text(kind.name())
+    resp.on_hover_text(t(kind.name()))
 }
 
 /// A vertical scroll area that uses Rainbow's chunky scroll bar instead of egui's.
@@ -2559,35 +2632,35 @@ fn row_context_menu(ui: &mut egui::Ui, c: &Chart, i: usize, checked: bool, downl
             ui.close();
         }
     };
-    pick(ui, "ℹ  Show details", RowAction::Details(i));
+    pick(ui, &t("ℹ  Show details"), RowAction::Details(i));
     if downloaded {
-        pick(ui, "📂  Show in folder", RowAction::Reveal(i));
+        pick(ui, &t("📂  Show in folder"), RowAction::Reveal(i));
     } else {
-        pick(ui, "⬇  Download", RowAction::Download(i));
+        pick(ui, &t("⬇  Download"), RowAction::Download(i));
     }
-    pick(ui, "▶  Preview", RowAction::Preview(i));
-    pick(ui, if checked { "☐  Deselect" } else { "☑  Select" }, RowAction::Toggle(i));
+    pick(ui, &t("▶  Preview"), RowAction::Preview(i));
+    pick(ui, &if checked { t("☐  Deselect") } else { t("☑  Select") }, RowAction::Toggle(i));
     ui.separator();
-    ui.menu_button("📋  Copy", |ui| {
-        let mut items = vec![("\"Artist - Song (Charter)\"", c.title())];
-        for (label, value) in [("Song name", &c.name), ("Artist", &c.artist), ("Album", &c.album), ("Charter", &c.charter)] {
+    ui.menu_button(t("📋  Copy"), |ui| {
+        let mut items = vec![(n("\"Artist - Song (Charter)\""), c.title())];
+        for (label, value) in [(n("Song name"), &c.name), (n("Artist"), &c.artist), (n("Album"), &c.album), (n("Charter"), &c.charter)] {
             if let Some(v) = value {
                 items.push((label, v.clone()));
             }
         }
         items.push(("MD5", c.md5.clone()));
         for (label, value) in items {
-            if ui.button(label).clicked() {
+            if ui.button(t(label)).clicked() {
                 ui.ctx().copy_text(value);
                 ui.close();
             }
         }
     });
     if let Some(a) = &c.artist {
-        pick(ui, "🔍  More by this artist", RowAction::Nav(Nav::Text(1, a.clone(), true)));
+        pick(ui, &t("🔍  More by this artist"), RowAction::Nav(Nav::Text(1, a.clone(), true)));
     }
     if let Some(ch) = &c.charter {
-        pick(ui, "🔍  More by this charter", RowAction::Nav(Nav::Text(5, ch.clone(), false)));
+        pick(ui, &t("🔍  More by this charter"), RowAction::Nav(Nav::Text(5, ch.clone(), false)));
     }
 }
 
@@ -2595,7 +2668,7 @@ fn row_context_menu(ui: &mut egui::Ui, c: &Chart, i: usize, checked: bool, downl
 fn copy_menu(resp: &egui::Response, items: &[(&str, String)]) {
     resp.context_menu(|ui| {
         for (label, value) in items {
-            if ui.button(format!("📋  {label}")).clicked() {
+            if ui.button(format!("📋  {}", t(label))).clicked() {
                 ui.ctx().copy_text(value.clone());
                 ui.close();
             }
@@ -2623,18 +2696,18 @@ fn text_menu(resp: &egui::Response, text: &mut String) -> bool {
         let place_cursor = |state: &mut egui::text_edit::TextEditState, at: usize| {
             state.cursor.set_char_range(Some(CCursorRange::one(CCursor::new(at))));
         };
-        if ui.add_enabled(has_selection, egui::Button::new("✂  Cut")).clicked() {
+        if ui.add_enabled(has_selection, egui::Button::new(t("✂  Cut"))).clicked() {
             ctx.copy_text(text[bs..be].to_owned());
             text.replace_range(bs..be, "");
             place_cursor(&mut state, start);
             changed = true;
             ui.close();
         }
-        if ui.add_enabled(has_selection, egui::Button::new("📋  Copy")).clicked() {
+        if ui.add_enabled(has_selection, egui::Button::new(t("📋  Copy"))).clicked() {
             ctx.copy_text(text[bs..be].to_owned());
             ui.close();
         }
-        if ui.button("📥  Paste").clicked() {
+        if ui.button(t("📥  Paste")).clicked() {
             if let Ok(clip) = arboard::Clipboard::new().and_then(|mut c| c.get_text()) {
                 let clip = clip.replace(['\r', '\n'], " ");
                 text.replace_range(bs..be, &clip);
@@ -2644,12 +2717,12 @@ fn text_menu(resp: &egui::Response, text: &mut String) -> bool {
             ui.close();
         }
         ui.separator();
-        if ui.add_enabled(len > 0, egui::Button::new("Select all")).clicked() {
+        if ui.add_enabled(len > 0, egui::Button::new(t("Select all"))).clicked() {
             state.cursor.set_char_range(Some(CCursorRange::two(CCursor::new(0), CCursor::new(len))));
             ctx.memory_mut(|m| m.request_focus(id));
             ui.close();
         }
-        if ui.add_enabled(len > 0, egui::Button::new("Clear")).clicked() {
+        if ui.add_enabled(len > 0, egui::Button::new(t("Clear"))).clicked() {
             text.clear();
             place_cursor(&mut state, 0);
             changed = true;
@@ -2669,6 +2742,7 @@ fn link(ui: &mut egui::Ui, text: RichText, tip: &str) -> bool {
 /// Like [`link`]; `truncate: false` always shows the whole text (e.g. in grids, which would
 /// otherwise squeeze it down to "…").
 fn link_ex(ui: &mut egui::Ui, text: RichText, tip: &str, truncate: bool) -> bool {
+    let tip = t(tip);
     let mut label = egui::Label::new(text).sense(Sense::click()).selectable(false);
     if truncate {
         label = label.truncate();
@@ -2691,7 +2765,7 @@ fn difficulty_cell(ui: &mut egui::Ui, c: &Chart, instrument: Option<u8>, nav: &m
         let d = c.diffs[i as usize];
         if d >= 0 {
             let resp = ui.add(egui::Label::new(theme::difficulty_dots(d)).sense(Sense::click()));
-            if resp.on_hover_text(format!("Intensity {d}: show more like this")).clicked() {
+            if resp.on_hover_text(tr!("Intensity {level}: show more like this", level = d)).clicked() {
                 *nav = Some(Nav::Difficulty(i, d));
             }
         }
@@ -2701,7 +2775,7 @@ fn difficulty_cell(ui: &mut egui::Ui, c: &Chart, instrument: Option<u8>, nav: &m
         let d = c.diffs[k];
         if d >= 0 {
             let color = theme::difficulty_color(d);
-            let tip = format!("{} intensity {d}: show more like this", INSTRUMENTS[k].1);
+            let tip = tr!("{instrument} intensity {level}: show more like this", instrument = t(INSTRUMENTS[k].1), level = d);
             if link(ui, RichText::new(format!("{label}{d}")).color(color).small().strong(), &tip) {
                 *nav = Some(Nav::Difficulty(k as u8, d));
             }
@@ -2711,17 +2785,17 @@ fn difficulty_cell(ui: &mut egui::Ui, c: &Chart, instrument: Option<u8>, nav: &m
 
 /// An icon with a tooltip. It only senses hover, so the row stays highlighted and clickable.
 fn tag_icon(ui: &mut egui::Ui, text: RichText, tip: &str) {
-    ui.add(egui::Label::new(text).selectable(false).sense(Sense::hover())).on_hover_text(tip);
+    ui.add(egui::Label::new(text).selectable(false).sense(Sense::hover())).on_hover_text(t(tip));
 }
 
 /// Icon tags for a table row: downloaded/broken status, source game, instruments and features.
 fn tags(ui: &mut egui::Ui, c: &Chart, downloaded: bool) {
     ui.spacing_mut().item_spacing.x = 4.0;
     if downloaded {
-        tag_icon(ui, RichText::new("✔").color(theme::good()), "Downloaded");
+        tag_icon(ui, RichText::new("✔").color(theme::good()), n("Downloaded"));
     }
     if c.has(flag::BROKEN) {
-        tag_icon(ui, RichText::new("⚠").color(theme::bad()), "Encore reports this chart as unplayable");
+        tag_icon(ui, RichText::new("⚠").color(theme::bad()), n("Encore reports this chart as unplayable"));
     }
     if let Some(g) = games::game_key(c.icon.as_deref()) {
         tag_icon(ui, RichText::new("🏆").color(theme::warn()), &games::game_name(&g));
@@ -2747,18 +2821,18 @@ fn tags(ui: &mut egui::Ui, c: &Chart, downloaded: bool) {
 /// Clicking one shows charts with that feature.
 fn feature_tags(ui: &mut egui::Ui, c: &Chart, full: bool, nav: &mut Option<Nav>) -> bool {
     let features = [
-        (flag::VIDEO, "🎬", "Video", theme::RAINBOW[4]),
-        (flag::LYRICS, "📝", "Lyrics", theme::RAINBOW[2]),
-        (flag::VOCALS, "🎤", "Vocals", theme::RAINBOW[6]),
-        (flag::SOLO, "🌟", "Solos", theme::RAINBOW[1]),
-        (flag::TAP, "👆", "Tap notes", theme::RAINBOW[3]),
-        (flag::OPEN, "⭕", "Open notes", theme::RAINBOW[5]),
-        (flag::FORCED, "⚡", "Forced notes", theme::RAINBOW[2]),
-        (flag::ROLL, "🌀", "Roll lanes", theme::RAINBOW[4]),
-        (flag::KICK2X, "👣", "2x kick", theme::RAINBOW[0]),
-        (flag::MODCHART, "🧪", "Modchart", theme::RAINBOW[6]),
-        (flag::ISSUES, "⚠", "Chart issues", theme::warn()),
-        (flag::BROKEN, "⛔", "Broken", theme::bad()),
+        (flag::VIDEO, "🎬", n("Video"), theme::RAINBOW[4]),
+        (flag::LYRICS, "📝", n("Lyrics"), theme::RAINBOW[2]),
+        (flag::VOCALS, "🎤", n("Vocals"), theme::RAINBOW[6]),
+        (flag::SOLO, "🌟", n("Solos"), theme::RAINBOW[1]),
+        (flag::TAP, "👆", n("Tap notes"), theme::RAINBOW[3]),
+        (flag::OPEN, "⭕", n("Open notes"), theme::RAINBOW[5]),
+        (flag::FORCED, "⚡", n("Forced notes"), theme::RAINBOW[2]),
+        (flag::ROLL, "🌀", n("Roll lanes"), theme::RAINBOW[4]),
+        (flag::KICK2X, "👣", n("2x kick"), theme::RAINBOW[0]),
+        (flag::MODCHART, "🧪", n("Modchart"), theme::RAINBOW[6]),
+        (flag::ISSUES, "⚠", n("Chart issues"), theme::warn()),
+        (flag::BROKEN, "⛔", n("Broken"), theme::bad()),
     ];
     let mut any = false;
     for (bit, icon, label, color) in features {
@@ -2767,12 +2841,13 @@ fn feature_tags(ui: &mut egui::Ui, c: &Chart, full: bool, nav: &mut Option<Nav>)
         }
         any = true;
         let clickable = bit != flag::BROKEN;
-        let tip = format!("{label}: show charts with this");
+        let label = t(label);
+        let tip = tr!("{feature}: show charts with this", feature = label);
         let clicked = if full {
             let resp = theme::chip(ui, &format!("{icon} {label}"), color);
             if clickable { resp.on_hover_text(&tip).clicked() } else { false }
         } else if !matches!(bit, flag::ISSUES | flag::BROKEN | flag::FORCED | flag::OPEN | flag::TAP) {
-            tag_icon(ui, RichText::new(icon).color(color), label);
+            tag_icon(ui, RichText::new(icon).color(color), &label);
             false
         } else {
             false
@@ -2785,13 +2860,13 @@ fn feature_tags(ui: &mut egui::Ui, c: &Chart, full: bool, nav: &mut Option<Nav>)
 }
 
 fn range_row(ui: &mut egui::Ui, label: &str, r: &mut Range, tip: &str, label_w: f32) {
-    let resp = ui.add_sized([label_w, 24.0], egui::Label::new(label).truncate());
+    let resp = ui.add_sized([label_w, 24.0], egui::Label::new(t(label)).truncate());
     if !tip.is_empty() {
-        resp.on_hover_text(tip);
+        resp.on_hover_text(t(tip));
     }
-    let min = ui.add_sized([64.0, 24.0], egui::TextEdit::singleline(&mut r.min).hint_text("Min"));
+    let min = ui.add_sized([64.0, 24.0], egui::TextEdit::singleline(&mut r.min).hint_text(t("Min")));
     text_menu(&min, &mut r.min);
-    let max = ui.add_sized([64.0, 24.0], egui::TextEdit::singleline(&mut r.max).hint_text("Max"));
+    let max = ui.add_sized([64.0, 24.0], egui::TextEdit::singleline(&mut r.max).hint_text(t("Max")));
     text_menu(&max, &mut r.max);
     ui.end_row();
 }
@@ -2877,14 +2952,17 @@ impl eframe::App for App {
                 egui::CentralPanel::default_margins().show(ui, |ui| self.settings_tab(ui));
             }
         }
-        if self.preview_backdrop(&ctx)
-            && let Some(p) = &mut self.preview
-            && !p.show(&ctx)
-        {
-            self.preview = None;
+        // Pop-ups sit over a blurred copy of the app; they're held back for the one frame the
+        // screenshot for the blur is taken.
+        if self.modal_backdrop(&ctx) {
+            if let Some(p) = &mut self.preview
+                && !p.show(&ctx)
+            {
+                self.preview = None;
+            }
+            self.confirm_dialog(&ctx);
+            self.shortcuts_window(&ctx);
         }
-        self.confirm_dialog(&ctx);
-        self.shortcuts_window(&ctx);
         self.drop_overlay(&ctx);
         self.sync_settings(&ctx);
 
@@ -2902,10 +2980,10 @@ impl eframe::App for App {
 
 fn ago(unix: u64) -> String {
     match now().saturating_sub(unix) {
-        s if s < 90 => "just now".to_owned(),
-        s if s < 90 * 60 => format!("{} min ago", s / 60),
-        s if s < 36 * 3600 => format!("{} h ago", s / 3600),
-        s => format!("{} days ago", s / 86400),
+        s if s < 90 => t("just now"),
+        s if s < 90 * 60 => tr!("{n} min ago", n = s / 60),
+        s if s < 36 * 3600 => tr!("{n} h ago", n = s / 3600),
+        s => tr!("{n} days ago", n = s / 86400),
     }
 }
 
