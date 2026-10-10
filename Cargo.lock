@@ -3005,6 +3005,7 @@ name = "rainbow"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "arboard",
  "eframe",
  "egui_extras",
  "image",

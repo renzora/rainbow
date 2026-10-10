@@ -131,6 +131,15 @@ enum Nav {
     Feature(u16),
 }
 
+/// What was picked from a result row's right-click menu.
+enum RowAction {
+    Details(usize),
+    Toggle(usize),
+    Download(usize),
+    Preview(usize),
+    Nav(Nav),
+}
+
 /// How a row was clicked, for file-manager style selection.
 enum RowClick {
     Plain(usize),
@@ -835,7 +844,7 @@ impl App {
             );
             // Measure the controls after the search box, so the box leaves exactly enough room.
             let controls_start = ui.cursor().left();
-            if resp.changed() {
+            if text_menu(&resp, &mut self.filters.query) || resp.changed() {
                 self.live_edited = Instant::now();
             }
 
@@ -1015,7 +1024,8 @@ impl App {
                                 ui.small("Exclude").on_hover_text("Do not include results that match this.");
                                 ui.end_row();
                                 for (k, label) in TEXT_FIELDS.iter().enumerate() {
-                                    ui.add_sized([field_w, 24.0], egui::TextEdit::singleline(&mut f.text[k].value).hint_text(*label));
+                                    let resp = ui.add_sized([field_w, 24.0], egui::TextEdit::singleline(&mut f.text[k].value).hint_text(*label));
+                                    text_menu(&resp, &mut f.text[k].value);
                                     ui.vertical_centered(|ui| theme::checkbox(ui, &mut f.text[k].exact, ""));
                                     ui.vertical_centered(|ui| theme::checkbox(ui, &mut f.text[k].exclude, ""));
                                     ui.end_row();
@@ -1040,13 +1050,18 @@ impl App {
                             let field_w = inner - 110.0;
                             egui::Grid::new("adv_misc").num_columns(2).spacing([8.0, 5.0]).show(ui, |ui| {
                                 ui.label("Modified after").on_hover_text("The date of the last time this chart was modified in Google Drive.");
-                                ui.add_sized([field_w, 24.0], egui::TextEdit::singleline(&mut f.modified_after).hint_text("YYYY-MM-DD"));
+                                let resp = ui.add_sized([field_w, 24.0], egui::TextEdit::singleline(&mut f.modified_after).hint_text("YYYY-MM-DD"));
+                                text_menu(&resp, &mut f.modified_after);
                                 ui.end_row();
                                 ui.label("Hash").on_hover_text("The MD5 hash of the chart folder or .sng file. You can enter multiple values if they are separated by commas.");
-                                ui.add_sized([field_w, 24.0], egui::TextEdit::singleline(&mut f.hash).hint_text("md5, md5, …"));
+                                let resp = ui.add_sized([field_w, 24.0], egui::TextEdit::singleline(&mut f.hash).hint_text("md5, md5, …"));
+                                text_menu(&resp, &mut f.hash);
                                 ui.end_row();
                                 ui.label("Track hash").on_hover_text("The hash of only things that impact scoring on a specific track. Multiple values can be separated by commas. Press Enter to look it up on Encore's server.");
                                 let resp = ui.add_sized([field_w, 24.0], egui::TextEdit::singleline(&mut f.track_hash).hint_text("press Enter to look up"));
+                                if text_menu(&resp, &mut f.track_hash) {
+                                    f.track_md5s = None;
+                                }
                                 ui.end_row();
                                 if resp.changed() {
                                     f.track_md5s = None;
@@ -1500,6 +1515,7 @@ impl App {
         let manifest = self.manifest.lock().unwrap();
         let mut click = None;
         let mut nav: Option<Nav> = None;
+        let mut row_menu: Option<RowAction> = None;
         let mut sort_click = None;
         let mut toggle_all = false;
         let any_selected = !self.selected.is_empty();
@@ -1673,6 +1689,7 @@ impl App {
                         });
                     }
                     let resp = row.response();
+                    resp.context_menu(|ui| row_context_menu(ui, c, i, is_checked, &mut row_menu));
                     // Screen readers announce the row as the song.
                     resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, true, is_checked, c.title()));
                     if resp.hovered() {
@@ -1734,6 +1751,22 @@ impl App {
         }
         if let Some(nav) = nav {
             self.navigate(nav);
+        }
+        match row_menu {
+            Some(RowAction::Details(i)) => self.handle_click(RowClick::Plain(i)),
+            Some(RowAction::Toggle(i)) => self.handle_click(RowClick::Checkbox(i)),
+            Some(RowAction::Download(i)) => {
+                let c = self.charts[self.results[i]].clone();
+                if self.job.is_none() {
+                    self.start_download(c.title(), vec![c]);
+                }
+            }
+            Some(RowAction::Preview(i)) => {
+                let c = self.charts[self.results[i]].clone();
+                self.preview = Some(preview::Preview::open(&self.client, &c, ui.ctx(), self.filters.instrument, self.filters.difficulty));
+            }
+            Some(RowAction::Nav(n)) => self.navigate(n),
+            None => {}
         }
         if toggle_all {
             if all_selected {
@@ -1809,7 +1842,8 @@ impl App {
             let size = ui.available_width().min(320.0);
             ui.vertical_centered(|ui| cover(ui, &mut self.covers, c.art.as_deref(), size, covers::LARGE));
             ui.add_space(8.0);
-            ui.label(RichText::new(c.name.as_deref().unwrap_or("Unknown")).heading().strong());
+            let title = ui.label(RichText::new(c.name.as_deref().unwrap_or("Unknown")).heading().strong());
+            copy_menu(&title, &[("Copy song name", c.name.clone().unwrap_or_default()), ("Copy \"Artist - Song\"", c.title())]);
             let mut nav = None;
             if let Some(a) = &c.artist
                 && link(ui, RichText::new(a).size(16.0).color(theme::accent()), "Show all songs by this artist")
@@ -1933,10 +1967,15 @@ impl App {
             ui.add_space(10.0);
             ui.horizontal(|ui| {
                 ui.weak("MD5");
-                ui.monospace(RichText::new(&c.md5).small());
-                if ui.small_button("📋").on_hover_text("Copy").clicked() {
-                    ui.ctx().copy_text(c.md5.clone());
-                }
+                // The copy button sits at the right edge; the hash takes what's left and
+                // shortens with "…" if needed (right-click or hover shows it in full).
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.small_button("📋").on_hover_text("Copy MD5").clicked() {
+                        ui.ctx().copy_text(c.md5.clone());
+                    }
+                    let hash = ui.add(egui::Label::new(RichText::new(&c.md5).monospace().small()).truncate());
+                    copy_menu(&hash.on_hover_text(&c.md5), &[("Copy MD5", c.md5.clone())]);
+                });
             });
             ui.add_space(8.0);
             if let Some(nav) = nav {
@@ -2173,12 +2212,13 @@ fn library_card(ui: &mut egui::Ui, s: &mut Settings, width: f32, busy: bool, exa
             "Use {name} {artist} {album} {genre} {year} {charter}, and / for subfolders.",
             |_| {},
         );
-        ui.add(
+        let resp = ui.add(
             egui::TextEdit::singleline(&mut s.folder_name)
                 .font(egui::FontId::proportional(15.0))
                 .margin(egui::Margin::symmetric(10, 7))
                 .desired_width(f32::INFINITY),
         );
+        text_menu(&resp, &mut s.folder_name);
         if let Some(example) = example {
             ui.label(RichText::new(format!("e.g.  {}", api::resolve_folder_name(&s.folder_name, example))).size(13.0).weak());
         }
@@ -2432,6 +2472,112 @@ fn tag_color(s: &str) -> Color32 {
     theme::RAINBOW[(h % theme::RAINBOW.len() as u32) as usize]
 }
 
+/// Right-click menu for a result row.
+fn row_context_menu(ui: &mut egui::Ui, c: &Chart, i: usize, checked: bool, action: &mut Option<RowAction>) {
+    ui.set_min_width(210.0);
+    let mut pick = |ui: &mut egui::Ui, label: &str, a: RowAction| {
+        if ui.button(label).clicked() {
+            *action = Some(a);
+            ui.close();
+        }
+    };
+    pick(ui, "ℹ  Show details", RowAction::Details(i));
+    pick(ui, "⬇  Download", RowAction::Download(i));
+    pick(ui, "▶  Preview", RowAction::Preview(i));
+    pick(ui, if checked { "☐  Deselect" } else { "☑  Select" }, RowAction::Toggle(i));
+    ui.separator();
+    ui.menu_button("📋  Copy", |ui| {
+        let mut items = vec![("\"Artist - Song (Charter)\"", c.title())];
+        for (label, value) in [("Song name", &c.name), ("Artist", &c.artist), ("Album", &c.album), ("Charter", &c.charter)] {
+            if let Some(v) = value {
+                items.push((label, v.clone()));
+            }
+        }
+        items.push(("MD5", c.md5.clone()));
+        for (label, value) in items {
+            if ui.button(label).clicked() {
+                ui.ctx().copy_text(value);
+                ui.close();
+            }
+        }
+    });
+    if let Some(a) = &c.artist {
+        pick(ui, "🔍  More by this artist", RowAction::Nav(Nav::Text(1, a.clone(), true)));
+    }
+    if let Some(ch) = &c.charter {
+        pick(ui, "🔍  More by this charter", RowAction::Nav(Nav::Text(5, ch.clone(), false)));
+    }
+}
+
+/// A right-click menu that copies one or more values.
+fn copy_menu(resp: &egui::Response, items: &[(&str, String)]) {
+    resp.context_menu(|ui| {
+        for (label, value) in items {
+            if ui.button(format!("📋  {label}")).clicked() {
+                ui.ctx().copy_text(value.clone());
+                ui.close();
+            }
+        }
+    });
+}
+
+/// Right-click menu for a text field: cut, copy, paste, select all and clear.
+/// Returns true if the text changed.
+fn text_menu(resp: &egui::Response, text: &mut String) -> bool {
+    use egui::text::{CCursor, CCursorRange};
+    let id = resp.id;
+    let mut changed = false;
+    resp.context_menu(|ui| {
+        let ctx = ui.ctx().clone();
+        let mut state = egui::TextEdit::load_state(&ctx, id).unwrap_or_default();
+        let len = text.chars().count();
+        let (start, end) = state.cursor.char_range().map_or((len, len), |r| {
+            let [a, b] = r.sorted_cursors();
+            (a.index.0.min(len), b.index.0.min(len))
+        });
+        let byte = |ci: usize| text.char_indices().nth(ci).map_or(text.len(), |(b, _)| b);
+        let (bs, be) = (byte(start), byte(end));
+        let has_selection = start < end;
+        let place_cursor = |state: &mut egui::text_edit::TextEditState, at: usize| {
+            state.cursor.set_char_range(Some(CCursorRange::one(CCursor::new(at))));
+        };
+        if ui.add_enabled(has_selection, egui::Button::new("✂  Cut")).clicked() {
+            ctx.copy_text(text[bs..be].to_owned());
+            text.replace_range(bs..be, "");
+            place_cursor(&mut state, start);
+            changed = true;
+            ui.close();
+        }
+        if ui.add_enabled(has_selection, egui::Button::new("📋  Copy")).clicked() {
+            ctx.copy_text(text[bs..be].to_owned());
+            ui.close();
+        }
+        if ui.button("📥  Paste").clicked() {
+            if let Ok(clip) = arboard::Clipboard::new().and_then(|mut c| c.get_text()) {
+                let clip = clip.replace(['\r', '\n'], " ");
+                text.replace_range(bs..be, &clip);
+                place_cursor(&mut state, start + clip.chars().count());
+                changed = true;
+            }
+            ui.close();
+        }
+        ui.separator();
+        if ui.add_enabled(len > 0, egui::Button::new("Select all")).clicked() {
+            state.cursor.set_char_range(Some(CCursorRange::two(CCursor::new(0), CCursor::new(len))));
+            ctx.memory_mut(|m| m.request_focus(id));
+            ui.close();
+        }
+        if ui.add_enabled(len > 0, egui::Button::new("Clear")).clicked() {
+            text.clear();
+            place_cursor(&mut state, 0);
+            changed = true;
+            ui.close();
+        }
+        state.store(&ctx, id);
+    });
+    changed
+}
+
 /// Text that acts as a link: turns the hover colour on hover, with a pointer cursor, and is
 /// cut short with "…" if it doesn't fit. Returns true if clicked.
 fn link(ui: &mut egui::Ui, text: RichText, tip: &str) -> bool {
@@ -2561,8 +2707,10 @@ fn range_row(ui: &mut egui::Ui, label: &str, r: &mut Range, tip: &str, label_w: 
     if !tip.is_empty() {
         resp.on_hover_text(tip);
     }
-    ui.add_sized([64.0, 24.0], egui::TextEdit::singleline(&mut r.min).hint_text("Min"));
-    ui.add_sized([64.0, 24.0], egui::TextEdit::singleline(&mut r.max).hint_text("Max"));
+    let min = ui.add_sized([64.0, 24.0], egui::TextEdit::singleline(&mut r.min).hint_text("Min"));
+    text_menu(&min, &mut r.min);
+    let max = ui.add_sized([64.0, 24.0], egui::TextEdit::singleline(&mut r.max).hint_text("Max"));
+    text_menu(&max, &mut r.max);
     ui.end_row();
 }
 
