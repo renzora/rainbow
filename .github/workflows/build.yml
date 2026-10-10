@@ -105,7 +105,7 @@ jobs:
       - name: Package
         run: |
           mkdir -p dist/rainbow
-          cp target/release/rainbow assets/icon-256.png README.md LICENSE dist/rainbow/
+          cp target/release/rainbow assets/icon-256.png README.md LICENSE-MIT LICENSE-APACHE dist/rainbow/
           tar -czf rainbow-linux-x64.tar.gz -C dist rainbow
       - uses: actions/upload-artifact@v7
         with:

@@ -3,7 +3,7 @@ name = "rainbow"
 version = "0.1.0"
 edition = "2024"
 description = "Search and download Clone Hero charts from Chorus Encore"
-license = "MIT"
+license = "MIT OR Apache-2.0"
 repository = "https://github.com/renzora/rainbow"
 
 [dependencies]
