@@ -85,11 +85,11 @@ impl Preview {
             };
         }
         let mut open = true;
-        egui::Window::new(RichText::new(format!("ÃƒÂ¢Ã¢â‚¬â€œÃ‚Â¶  {}", self.title)).strong())
+        egui::Window::new(RichText::new(format!("▶  {}", self.title)).strong())
             .id(egui::Id::new("chart_preview"))
             .open(&mut open)
-            .default_size([480.0, 680.0])
-            .min_size([320.0, 360.0])
+            .default_size([360.0, 680.0])
+            .min_size([280.0, 360.0])
             .collapsible(false)
             .show(ctx, |ui| self.contents(ui));
         open
@@ -112,7 +112,7 @@ impl Preview {
                 ui.vertical_centered(|ui| {
                     ui.add_space(ui.available_height() / 2.0 - 30.0);
                     ui.spinner();
-                    ui.label("Downloading the chartÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¦");
+                    ui.label("Downloading the chart…");
                 });
                 return;
             }
@@ -189,7 +189,7 @@ impl Preview {
 
         ui.add_space(6.0);
         ui.horizontal(|ui| {
-            let icon = if self.playing { "ÃƒÂ¢Ã‚ÂÃ‚Â¸" } else { "ÃƒÂ¢Ã¢â‚¬â€œÃ‚Â¶" };
+            let icon = if self.playing { "⏸" } else { "▶" };
             if ui.add(egui::Button::new(RichText::new(icon).size(16.0)).min_size(vec2(36.0, 28.0))).on_hover_text("Play/pause (Space)").clicked() {
                 self.toggle(song.end);
             }
@@ -198,11 +198,11 @@ impl Preview {
             ui.spacing_mut().slider_width = (ui.available_width() - right).max(60.0);
             ui.add(egui::Slider::new(&mut self.time, -1.0..=song.end).show_value(false));
             egui::ComboBox::from_id_salt("preview_speed")
-                .selected_text(format!("{}ÃƒÆ’Ã¢â‚¬â€", self.speed))
+                .selected_text(format!("{}×", self.speed))
                 .width(64.0)
                 .show_ui(ui, |ui| {
                     for s in SPEEDS {
-                        ui.selectable_value(&mut self.speed, s, format!("{s}ÃƒÆ’Ã¢â‚¬â€"));
+                        ui.selectable_value(&mut self.speed, s, format!("{s}×"));
                     }
                 })
                 .response
@@ -262,7 +262,8 @@ fn draw(p: egui::Painter, rect: Rect, song: &Song, track: &Track, now: f32, wind
     let colors = lane_colors(layout);
     let horizon = rect.top() + 10.0;
     let strike = rect.bottom() - rect.height() * 0.1;
-    let half_w = (rect.width() * 0.46).min(rect.height() * 0.4);
+    // Keep the highway slim: narrower than the window, and never wider than about half its height.
+    let half_w = (rect.width() * 0.4).min(rect.height() * 0.26);
     let cx = rect.center().x;
     // Depth z: 0 at the strike line, 1 at the far end. Far things are smaller and bunched up.
     let depth = |z: f32| (1.0 - z) / (1.0 + 1.6 * z);
