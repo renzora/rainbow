@@ -66,7 +66,7 @@ impl Default for Columns {
 pub struct Settings {
     pub dir: PathBuf,
     pub folder_name: String,
-    pub dark: bool,
+    pub theme: crate::theme::ThemeKind,
     pub zoom: f32,
     pub format: DownloadFormat,
     pub video: bool,
@@ -90,7 +90,7 @@ impl Default for Settings {
         Self {
             dir: crate::api::default_songs_dir(),
             folder_name: "{artist} - {name} ({charter})".to_owned(),
-            dark: true,
+            theme: crate::theme::ThemeKind::Midnight,
             zoom: 1.0,
             format: DownloadFormat::Sng,
             video: false,

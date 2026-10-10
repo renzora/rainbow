@@ -28,7 +28,7 @@ use catalogue::Catalogue;
 use covers::Covers;
 use filter::{Filters, Index, Range, SortKey, TEXT_FIELDS, TOGGLES};
 use settings::{Density, DownloadFormat, Settings};
-use theme::{ACCENT, AMBER, GREEN, RED};
+use theme::{AMBER, GREEN, RED};
 
 const MAX_LOG: usize = 500;
 /// Downloads bigger than this ask for confirmation and use the polite delay.
@@ -114,6 +114,18 @@ enum Section {
     Features,
 }
 
+/// Clicking a value (artist, charter, game, ...) shows every chart that shares it.
+#[derive(Clone)]
+enum Nav {
+    /// An advanced-search text field (index into TEXT_FIELDS) and whether to match exactly.
+    Text(usize, String, bool),
+    Album { artist: Option<String>, album: String },
+    Game(String),
+    Instrument(u8),
+    Difficulty(u8, i8),
+    Feature(u16),
+}
+
 /// How a row was clicked, for file-manager style selection.
 enum RowClick {
     Plain(usize),
@@ -163,6 +175,8 @@ struct App {
 
     selected: HashSet<String>,
     anchor: Option<usize>,
+    /// Filters before each click-through, for the Back button.
+    history: Vec<Filters>,
     detail: Option<Chart>,
     scroll_to_top: bool,
     manifest: Arc<Mutex<Manifest>>,
@@ -190,7 +204,7 @@ impl App {
             repaint.request_repaint();
         }));
         let settings = Settings::load();
-        theme::apply(ctx, settings.dark, settings.zoom);
+        theme::apply(ctx, settings.theme, settings.zoom);
         theme::install_fonts(ctx);
         egui_extras::install_image_loaders(ctx);
         let logo = image::load_from_memory(LOGO_PNG).ok().map(|img| {
@@ -231,6 +245,7 @@ impl App {
             track_lookup: false,
             selected: HashSet::new(),
             anchor: None,
+            history: Vec::new(),
             detail: None,
             scroll_to_top: false,
             job: None,
@@ -529,7 +544,7 @@ impl App {
                 let on = self.tab == tab;
                 let text = RichText::new(label).size(15.0);
                 let button = if on {
-                    egui::Button::new(text.color(Color32::WHITE).strong()).fill(ACCENT)
+                    egui::Button::new(text.color(Color32::WHITE).strong()).fill(theme::accent())
                 } else {
                     egui::Button::new(text).frame(false)
                 };
@@ -665,7 +680,7 @@ impl App {
                 frame.show(ui, |ui| {
                     ui.set_width(width - 32.0);
                     ui.horizontal(|ui| {
-                        ui.label(RichText::new("🎛  Advanced search").size(17.0).strong().color(theme::ACCENT_HOVER));
+                        ui.label(RichText::new("🎛  Advanced search").size(17.0).strong().color(theme::accent_hover()));
                         ui.weak(format!("{} results", self.results.len()));
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if ui.button("✖  Close").on_hover_text("Esc").clicked() {
@@ -726,7 +741,7 @@ impl App {
             .show(ui, |ui| {
                 ui.set_width(inner);
                 ui.vertical(|ui| {
-                    ui.label(RichText::new(title).strong().color(theme::ACCENT_HOVER));
+                    ui.label(RichText::new(title).strong().color(theme::accent_hover()));
                     ui.add_space(6.0);
                     match section {
                         Section::Text => {
@@ -870,28 +885,28 @@ impl App {
             }
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                link(
+                web_link(
                     ui,
                     Some(egui::include_image!("../assets/icons/github.svg")),
                     "GitHub",
                     "https://github.com/RenzoraEngine/rainbow",
                     "Rainbow's source code, releases and issue tracker",
                 );
-                link(
+                web_link(
                     ui,
                     Some(egui::include_image!("../assets/icons/patreon.svg")),
                     "Patreon",
                     "https://www.patreon.com/cw/ChorusEncore701?l=en-GB",
                     "Support Chorus Encore: it's donation-funded and pays for the servers and file hosting Rainbow uses",
                 );
-                link(
+                web_link(
                     ui,
                     Some(egui::include_image!("../assets/icons/discord.svg")),
                     "Discord",
                     "https://discord.gg/cqaUXGm",
                     "Join the Chorus Encore Discord community",
                 );
-                link(ui, None, "🌐 Encore", "https://www.enchor.us", "Chorus Encore, the chart search engine Rainbow is built on");
+                web_link(ui, None, "🌐 Encore", "https://www.enchor.us", "Chorus Encore, the chart search engine Rainbow is built on");
                 ui.separator();
                 if ui
                     .selectable_label(self.show_log, format!("📜 Log ({})", self.log.len()))
@@ -922,7 +937,7 @@ impl App {
                 self.stop.store(true, Ordering::Relaxed);
             }
         });
-        ui.add(egui::ProgressBar::new(job.checked as f32 / job.total.max(1) as f32).show_percentage().fill(ACCENT));
+        ui.add(egui::ProgressBar::new(job.checked as f32 / job.total.max(1) as f32).show_percentage().fill(theme::accent()));
         if let Some((title, done, total)) = &job.file {
             let frac = total.map(|t| *done as f32 / t.max(1) as f32).unwrap_or(0.0);
             ui.add(egui::ProgressBar::new(frac).text(format!("{title}  ({:.1} MB)", *done as f64 / 1_048_576.0)));
@@ -993,6 +1008,113 @@ impl App {
             Col::Uploaded => 90.0,
             Col::Tags => 120.0,
         }
+    }
+
+    /// Shows every chart sharing the clicked value. The previous search can be restored with Back.
+    fn navigate(&mut self, nav: Nav) {
+        self.history.push(self.filters.clone());
+        let mut f = Filters { sort: self.filters.sort, descending: self.filters.descending, ..Default::default() };
+        match nav {
+            Nav::Text(k, value, exact) => f.text[k] = filter::TextFilter { value, exact, exclude: false },
+            Nav::Album { artist, album } => {
+                f.text[2] = filter::TextFilter { value: album, exact: true, exclude: false };
+                if let Some(artist) = artist {
+                    f.text[1] = filter::TextFilter { value: artist, exact: true, exclude: false };
+                }
+            }
+            Nav::Game(g) => f.game = Some(g),
+            Nav::Instrument(i) => f.instrument = Some(i),
+            Nav::Difficulty(i, d) => {
+                f.instrument = Some(i);
+                f.intensity = Range { min: d.to_string(), max: d.to_string() };
+            }
+            Nav::Feature(bit) => {
+                if let Some(k) = TOGGLES.iter().position(|(_, b, _)| *b == bit) {
+                    f.toggles[k] = Some(true);
+                }
+            }
+        }
+        self.filters = f;
+        self.show_advanced = false;
+    }
+
+    /// Removable chips for the active filters, plus Back after a click-through.
+    fn active_filters(&mut self, ui: &mut egui::Ui) {
+        let f = &self.filters;
+        let mut chips: Vec<(String, Box<dyn Fn(&mut Filters)>)> = Vec::new();
+        for (k, t) in f.text.iter().enumerate() {
+            if !t.value.trim().is_empty() {
+                let how = if t.exclude { "is not" } else if t.exact { "is" } else { "contains" };
+                chips.push((format!("{} {how} \"{}\"", TEXT_FIELDS[k], t.value.trim()), Box::new(move |f| f.text[k] = Default::default())));
+            }
+        }
+        if let Some(i) = f.instrument {
+            chips.push((format!("{} {}", instrument_icon(i), INSTRUMENTS[i as usize].1), Box::new(|f| f.instrument = None)));
+        }
+        if let Some(d) = f.difficulty {
+            chips.push((DIFFICULTIES[d as usize].1.to_owned(), Box::new(|f| f.difficulty = None)));
+        }
+        if let Some(g) = &f.game {
+            chips.push((format!("🏆 {}", games::game_name(g)), Box::new(|f| f.game = None)));
+        } else if f.legacy {
+            chips.push(("🏆 Legacy".to_owned(), Box::new(|f| f.legacy = false)));
+        }
+        for (label, range, clear) in [
+            ("Length", &f.length_min, (|f: &mut Filters| f.length_min = Range::default()) as fn(&mut Filters)),
+            ("Intensity", &f.intensity, |f: &mut Filters| f.intensity = Range::default()),
+            ("Avg NPS", &f.avg_nps, |f: &mut Filters| f.avg_nps = Range::default()),
+            ("Max NPS", &f.max_nps, |f: &mut Filters| f.max_nps = Range::default()),
+            ("Year", &f.year, |f: &mut Filters| f.year = Range::default()),
+        ] {
+            let (min, max) = (range.min.trim(), range.max.trim());
+            let text = match (min.is_empty(), max.is_empty()) {
+                (true, true) => continue,
+                _ if min == max => format!("{label} {min}"),
+                (false, true) => format!("{label} ≥ {min}"),
+                (true, false) => format!("{label} ≤ {max}"),
+                (false, false) => format!("{label} {min}–{max}"),
+            };
+            chips.push((text, Box::new(clear)));
+        }
+        for (k, (label, _, _)) in TOGGLES.iter().enumerate() {
+            if let Some(want) = f.toggles[k] {
+                let text = if want { format!("✔ {label}") } else { format!("✖ No {}", label.to_lowercase()) };
+                chips.push((text, Box::new(move |f| f.toggles[k] = None)));
+            }
+        }
+        if !f.modified_after.trim().is_empty() {
+            chips.push((format!("Modified after {}", f.modified_after.trim()), Box::new(|f| f.modified_after.clear())));
+        }
+        if !f.hash.trim().is_empty() || !f.track_hash.trim().is_empty() {
+            chips.push(("Hash".to_owned(), Box::new(|f| {
+                f.hash.clear();
+                f.track_hash.clear();
+                f.track_md5s = None;
+            })));
+        }
+        if chips.is_empty() && self.history.is_empty() {
+            return;
+        }
+        ui.add_space(4.0);
+        ui.horizontal_wrapped(|ui| {
+            if !self.history.is_empty() && ui.button("← Back").on_hover_text("Go back to the previous search").clicked() {
+                self.filters = self.history.pop().unwrap_or_default();
+                return;
+            }
+            let mut remove = None;
+            for (k, (text, _)) in chips.iter().enumerate() {
+                if theme::chip(ui, &format!("{text}  ✖"), theme::accent_hover()).on_hover_text("Remove this filter").clicked() {
+                    remove = Some(k);
+                }
+            }
+            if let Some(k) = remove {
+                (chips[k].1)(&mut self.filters);
+            }
+            if chips.len() > 1 && ui.small_button("Clear all").clicked() {
+                let keep = (self.filters.sort, self.filters.descending);
+                self.filters = Filters { sort: keep.0, descending: keep.1, ..Default::default() };
+            }
+        });
     }
 
     fn toolbar_left(&mut self, ui: &mut egui::Ui, wide: bool) {
@@ -1071,11 +1193,16 @@ impl App {
         }
         ui.add_space(4.0);
 
-        let table_width = ui.available_width();
+        // The table, with a strip on the right for the custom scroll bar.
+        let full = ui.available_rect_before_wrap();
+        let table_rect = full.with_max_x(full.right() - theme::SCROLLBAR_W - 6.0);
+        let mut table_ui = ui.new_child(egui::UiBuilder::new().max_rect(table_rect));
+        let table_width = table_rect.width();
         let cols = self.columns(table_width);
         let widths: Vec<f32> = cols.iter().map(|&c| self.column_width(c)).collect();
         let manifest = self.manifest.lock().unwrap();
         let mut click = None;
+        let mut nav: Option<Nav> = None;
         let mut sort_click = None;
         let mut toggle_all = false;
         let any_selected = !self.selected.is_empty();
@@ -1102,7 +1229,8 @@ impl App {
             Density::Default => 14.5,
             Density::Large => 17.0,
         };
-        let mut table = TableBuilder::new(ui)
+        let mut table = TableBuilder::new(&mut table_ui)
+            .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
             // A new id when the layout preset changes, so remembered column widths reset.
             // Separate remembered widths per layout and per set of visible columns.
             .id_salt(format!("results-{}-{:?}", self.table_gen, cols))
@@ -1165,7 +1293,7 @@ impl App {
                         let arrow = if active { if desc { " ⏷" } else { " ⏶" } } else { "" };
                         let mut text = RichText::new(format!("{title}{arrow}")).strong();
                         if active {
-                            text = text.color(theme::ACCENT_HOVER);
+                            text = text.color(theme::accent_hover());
                         }
                         if ui.add(egui::Button::new(text).frame(false)).on_hover_text("Sort").clicked() {
                             sort_click = Some(key);
@@ -1199,30 +1327,48 @@ impl App {
                                 ui.label(RichText::new(text(&c.name)).strong().size(name_size));
                             }
                             Col::Artist => {
-                                ui.label(text(&c.artist));
+                                if let Some(a) = &c.artist
+                                    && link(ui, RichText::new(a), "Show all songs by this artist")
+                                {
+                                    nav = Some(Nav::Text(1, a.clone(), true));
+                                }
                             }
                             Col::Album => {
-                                ui.weak(text(&c.album));
+                                if let Some(a) = &c.album
+                                    && link(ui, RichText::new(a).weak(), "Show this album")
+                                {
+                                    nav = Some(Nav::Album { artist: c.artist.clone(), album: a.clone() });
+                                }
                             }
                             Col::Genre => {
-                                if let Some(g) = &c.genre {
-                                    theme::chip(ui, g, tag_color(g));
+                                if let Some(g) = &c.genre
+                                    && theme::chip(ui, g, tag_color(g)).on_hover_text("Show this genre").clicked()
+                                {
+                                    nav = Some(Nav::Text(3, g.clone(), true));
                                 }
                             }
                             Col::Year => {
-                                ui.weak(text(&c.year));
+                                if let Some(y) = &c.year
+                                    && link(ui, RichText::new(y).weak(), "Show songs from this year")
+                                {
+                                    nav = Some(Nav::Text(4, y.clone(), true));
+                                }
                             }
                             Col::Charter => {
-                                ui.label(text(&c.charter));
+                                if let Some(ch) = &c.charter
+                                    && link(ui, RichText::new(ch), "Show everything charted by this charter")
+                                {
+                                    nav = Some(Nav::Text(5, ch.clone(), false));
+                                }
                             }
                             Col::Length => {
                                 ui.weak(c.length_text());
                             }
-                            Col::Difficulty => difficulty_cell(ui, c, instrument),
+                            Col::Difficulty => difficulty_cell(ui, c, instrument, &mut nav),
                             Col::Uploaded => {
                                 ui.weak(c.uploaded());
                             }
-                            Col::Tags => tags(ui, c, manifest.contains(&c.md5)),
+                            Col::Tags => tags(ui, c, manifest.contains(&c.md5), &mut nav),
                             }
                         });
                     }
@@ -1243,6 +1389,19 @@ impl App {
                 });
             });
         drop(manifest);
+
+        let bar = egui::Rect::from_min_max(
+            egui::pos2(full.right() - theme::SCROLLBAR_W, scroll.inner_rect.top()),
+            egui::pos2(full.right(), scroll.inner_rect.bottom()),
+        );
+        let view = scroll.inner_rect.height();
+        if let Some(offset) = theme::scrollbar(ui, bar, scroll.id.with("bar"), scroll.state.offset.y, scroll.content_size.y, view) {
+            let mut state = scroll.state;
+            state.offset.y = offset;
+            state.store(ui.ctx(), scroll.id);
+            ui.ctx().request_repaint();
+        }
+        ui.advance_cursor_after_rect(full);
 
         // Floating "back to top" button once the list is scrolled down.
         if scroll.state.offset.y > 300.0 {
@@ -1267,6 +1426,9 @@ impl App {
         }
         if let Some(click) = click {
             self.handle_click(click);
+        }
+        if let Some(nav) = nav {
+            self.navigate(nav);
         }
         if toggle_all {
             if all_selected {
@@ -1330,7 +1492,7 @@ impl App {
             return;
         };
         let downloaded = self.manifest.lock().unwrap().contains(&c.md5);
-        egui::ScrollArea::vertical().show(ui, |ui| {
+        fancy_scroll(ui, "detail", |ui| {
             ui.add_space(8.0);
             ui.horizontal(|ui| {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
@@ -1343,21 +1505,44 @@ impl App {
             ui.vertical_centered(|ui| cover(ui, &mut self.covers, c.art.as_deref(), size, covers::LARGE));
             ui.add_space(8.0);
             ui.label(RichText::new(c.name.as_deref().unwrap_or("Unknown")).heading().strong());
-            ui.label(RichText::new(c.artist.as_deref().unwrap_or("Unknown Artist")).size(16.0).color(theme::ACCENT_HOVER));
-            let sub: Vec<&str> = [c.album.as_deref(), c.year.as_deref()].into_iter().flatten().collect();
-            if !sub.is_empty() {
-                ui.weak(sub.join("  ·  "));
+            let mut nav = None;
+            if let Some(a) = &c.artist
+                && link(ui, RichText::new(a).size(16.0).color(theme::accent_hover()), "Show all songs by this artist")
+            {
+                nav = Some(Nav::Text(1, a.clone(), true));
             }
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing.x = 4.0;
+                if let Some(a) = &c.album
+                    && link(ui, RichText::new(a).weak(), "Show this album")
+                {
+                    nav = Some(Nav::Album { artist: c.artist.clone(), album: a.clone() });
+                }
+                if let Some(y) = &c.year {
+                    if c.album.is_some() {
+                        ui.weak("·");
+                    }
+                    if link(ui, RichText::new(y).weak(), "Show songs from this year") {
+                        nav = Some(Nav::Text(4, y.clone(), true));
+                    }
+                }
+            });
             ui.add_space(6.0);
             ui.horizontal_wrapped(|ui| {
-                if let Some(g) = games::game_key(c.icon.as_deref()) {
-                    theme::chip(ui, &format!("🏆 {}", games::game_name(&g)), AMBER);
+                if let Some(g) = games::game_key(c.icon.as_deref())
+                    && theme::chip(ui, &format!("🏆 {}", games::game_name(&g)), AMBER).on_hover_text("Show this game's charts").clicked()
+                {
+                    nav = Some(Nav::Game(g));
                 }
-                if let Some(g) = &c.genre {
-                    theme::chip(ui, g, tag_color(g));
+                if let Some(g) = &c.genre
+                    && theme::chip(ui, g, tag_color(g)).on_hover_text("Show this genre").clicked()
+                {
+                    nav = Some(Nav::Text(3, g.clone(), true));
                 }
-                if let Some(ch) = &c.charter {
-                    theme::chip(ui, &format!("✏ {ch}"), theme::RAINBOW[4]);
+                if let Some(ch) = &c.charter
+                    && theme::chip(ui, &format!("✏ {ch}"), theme::RAINBOW[4]).on_hover_text("Show everything charted by this charter").clicked()
+                {
+                    nav = Some(Nav::Text(5, ch.clone(), false));
                 }
                 if !c.length_text().is_empty() {
                     theme::chip(ui, &format!("⏱ {}", c.length_text()), theme::RAINBOW[6]);
@@ -1386,9 +1571,14 @@ impl App {
                     if d < 0 && notes.is_none() {
                         continue;
                     }
-                    ui.label(format!("{}  {name}", instrument_icon(k as u8)));
+                    if link(ui, RichText::new(format!("{}  {name}", instrument_icon(k as u8))), "Show charts for this instrument") {
+                        nav = Some(Nav::Instrument(k as u8));
+                    }
                     if d >= 0 {
-                        ui.label(theme::difficulty_dots(d)).on_hover_text(format!("Intensity {d}"));
+                        let resp = ui.add(egui::Label::new(theme::difficulty_dots(d)).sense(Sense::click()));
+                        if resp.on_hover_text(format!("Intensity {d}: show {name} charts at this intensity")).clicked() {
+                            nav = Some(Nav::Difficulty(k as u8, d));
+                        }
                     } else {
                         ui.label("");
                     }
@@ -1403,7 +1593,7 @@ impl App {
             ui.add_space(10.0);
             ui.label(RichText::new("Features").strong());
             ui.horizontal_wrapped(|ui| {
-                let any = feature_tags(ui, &c, true);
+                let any = feature_tags(ui, &c, true, &mut nav);
                 if !any {
                     ui.weak("None");
                 }
@@ -1418,6 +1608,9 @@ impl App {
                 }
             });
             ui.add_space(8.0);
+            if let Some(nav) = nav {
+                self.navigate(nav);
+            }
         });
     }
 
@@ -1476,152 +1669,47 @@ impl App {
     // ──────────────────────────── Settings tab ────────────────────────────
 
     fn settings_tab(&mut self, ui: &mut egui::Ui) {
-        let busy = self.job.is_some();
+        let mut actions = SettingsActions::default();
         let example = self.charts.first().cloned();
+        let busy = self.job.is_some();
         let building = matches!(self.cat_status, CatStatus::Building { .. });
-        let mut rebuild = false;
-        let mut extract_now = false;
-        egui::ScrollArea::vertical().show(ui, |ui| {
-            ui.set_max_width(820.0);
-            let s = &mut self.settings;
-            ui.add_space(10.0);
-
-            card(ui, "📁 Chart library", |ui| {
-                ui.horizontal(|ui| {
-                    ui.monospace(s.dir.display().to_string());
-                });
-                ui.horizontal(|ui| {
-                    if ui.button("📂 Open Folder").clicked() {
-                        open_folder(&s.dir);
-                    }
-                    if ui.add_enabled(!busy, theme::primary("Choose…")).clicked()
-                        && let Some(dir) = rfd::FileDialog::new().set_directory(&s.dir).pick_folder()
-                    {
-                        s.dir = dir;
-                    }
-                });
-                ui.add_space(6.0);
-                ui.horizontal(|ui| {
-                    ui.label("Chart folder name");
-                    ui.label("ⓘ").on_hover_text(
-                        "Name for each downloaded chart. Use {name} {artist} {album} {genre} {year} {charter}.\n\
-                         Use / to make subfolders, e.g. {artist}/{album}/{name} ({charter})",
-                    );
-                });
-                ui.add(egui::TextEdit::singleline(&mut s.folder_name).desired_width(f32::INFINITY));
-                if let Some(example) = &example {
-                    ui.weak(format!("e.g. {}", api::resolve_folder_name(&s.folder_name, example)));
+        fancy_scroll(ui, "settings", |ui| {
+            // Centred content; two columns of cards on wide windows, one otherwise.
+            let avail = ui.available_width();
+            let width = (avail - 32.0).min(1240.0);
+            let two = width >= 1000.0;
+            let card_w = if two { (width - 16.0) / 2.0 } else { width };
+            ui.add_space(12.0);
+            ui.horizontal_top(|ui| {
+                ui.add_space(((avail - width) / 2.0).max(0.0));
+                let s = &mut self.settings;
+                if two {
+                    ui.vertical(|ui| {
+                        library_card(ui, s, card_w, busy, example.as_ref(), &mut actions);
+                        downloads_card(ui, s, card_w, busy, &mut actions);
+                    });
+                    ui.add_space(16.0);
+                    ui.vertical(|ui| {
+                        appearance_card(ui, s, card_w);
+                        catalogue_card(ui, s, card_w, building, &mut actions);
+                    });
+                } else {
+                    ui.vertical(|ui| {
+                        library_card(ui, s, card_w, busy, example.as_ref(), &mut actions);
+                        downloads_card(ui, s, card_w, busy, &mut actions);
+                        appearance_card(ui, s, card_w);
+                        catalogue_card(ui, s, card_w, building, &mut actions);
+                    });
                 }
             });
-
-            card(ui, "🎨 Appearance", |ui| {
-                ui.horizontal(|ui| {
-                    ui.selectable_value(&mut s.dark, true, "🌙 Dark");
-                    ui.selectable_value(&mut s.dark, false, "☀ Light");
-                    ui.separator();
-                    if ui.button("➖").on_hover_text("Zoom out").clicked() {
-                        s.zoom = (s.zoom - 0.1).max(0.5);
-                    }
-                    ui.label(format!("{:.0}%", s.zoom * 100.0));
-                    if ui.button("➕").on_hover_text("Zoom in").clicked() {
-                        s.zoom = (s.zoom + 0.1).min(2.5);
-                    }
-                });
-                ui.add_space(4.0);
-                ui.horizontal(|ui| {
-                    ui.label("Table layout:");
-                    for (d, label) in [(Density::Compact, "Compact"), (Density::Default, "Default"), (Density::Large, "Large")] {
-                        if ui.radio_value(&mut s.density, d, label).changed() {
-                            s.cover_size = d.cover_size();
-                        }
-                    }
-                });
-                ui.weak("Tip: drag the edge of the cover column to make covers bigger or smaller.");
-                ui.add_space(4.0);
-                ui.label("Table columns:");
-                ui.horizontal_wrapped(|ui| {
-                    let c = &mut s.columns;
-                    theme::checkbox(ui, &mut c.cover, "Cover");
-                    theme::checkbox(ui, &mut c.artist, "Artist");
-                    theme::checkbox(ui, &mut c.album, "Album");
-                    theme::checkbox(ui, &mut c.genre, "Genre");
-                    theme::checkbox(ui, &mut c.year, "Year");
-                    theme::checkbox(ui, &mut c.charter, "Charter");
-                    theme::checkbox(ui, &mut c.length, "Length");
-                    theme::checkbox(ui, &mut c.difficulty, "Difficulty");
-                    theme::checkbox(ui, &mut c.uploaded, "Upload Date");
-                });
-            });
-
-            card(ui, "⬇ Downloads", |ui| {
-                ui.add_enabled_ui(!busy, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.label("Format:");
-                        ui.radio_value(&mut s.format, DownloadFormat::Sng, ".sng");
-                        ui.radio_value(&mut s.format, DownloadFormat::Folder, "Chart Folder");
-                        ui.label("ⓘ").on_hover_text(
-                            ".sng: one file per chart; Clone Hero and YARG read these directly.\n\
-                             Chart Folder: unpacked into a normal folder with song.ini, notes and audio files.",
-                        );
-                    });
-                    theme::checkbox(ui, &mut s.video, "🎬 Download video backgrounds");
-                });
-                ui.add_space(6.0);
-                theme::checkbox(ui, &mut s.auto_extract, "📦 Automatically extract .zip files in the songs folder")
-                    .on_hover_text("Charts downloaded as .zip from other sites are unpacked into a chart folder so Clone Hero can find them. Checked every few seconds while Rainbow is open.");
-                ui.add_enabled_ui(s.auto_extract, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.add_space(26.0);
-                        theme::checkbox(ui, &mut s.delete_zips, "Delete the .zip after extracting")
-                            .on_hover_text(format!("Otherwise it's moved to the {} folder inside your songs folder.", unzip::DONE_DIR));
-                    });
-                });
-                if ui.button("📦 Extract zips now").clicked() {
-                    extract_now = true;
-                }
-                ui.horizontal(|ui| {
-                    ui.label("Wait between bulk downloads:");
-                    ui.add(egui::Slider::new(&mut s.delay_secs, 0.5..=10.0).suffix(" s"));
-                });
-            });
-
-            card(ui, "📚 Catalogue", |ui| {
-                let size = std::fs::metadata(catalogue::path()).map(|m| m.len()).unwrap_or(0);
-                ui.weak(format!("{}  ({:.1} MB)", catalogue::path().display(), size as f64 / 1_048_576.0));
-                ui.horizontal(|ui| {
-                    ui.label("Check for new charts on startup:");
-                    let text = match s.refresh_after_hours {
-                        None => "Never (use the Refresh button)",
-                        Some(0) => "Every launch",
-                        Some(12) => "If older than 12 hours",
-                        Some(24) => "If older than 1 day",
-                        Some(168) => "If older than 1 week",
-                        Some(_) => "Custom",
-                    };
-                    egui::ComboBox::from_id_salt("refresh").selected_text(text).width(220.0).show_ui(ui, |ui| {
-                        ui.selectable_value(&mut s.refresh_after_hours, Some(0), "Every launch");
-                        ui.selectable_value(&mut s.refresh_after_hours, Some(12), "If older than 12 hours");
-                        ui.selectable_value(&mut s.refresh_after_hours, Some(24), "If older than 1 day");
-                        ui.selectable_value(&mut s.refresh_after_hours, Some(168), "If older than 1 week");
-                        ui.selectable_value(&mut s.refresh_after_hours, None, "Never (use the Refresh button)");
-                    });
-                });
-                if ui
-                    .add_enabled(!building, egui::Button::new("⟳ Rebuild from scratch"))
-                    .on_hover_text("Re-download the whole chart list (about 5 minutes). Normally a refresh is enough.")
-                    .clicked()
-                {
-                    rebuild = true;
-                }
-            });
-
-            ui.add_space(6.0);
-            ui.weak(concat!("Rainbow v", env!("CARGO_PKG_VERSION")));
+            ui.add_space(8.0);
+            ui.vertical_centered(|ui| ui.weak(concat!("Rainbow v", env!("CARGO_PKG_VERSION"))));
+            ui.add_space(12.0);
         });
-        if rebuild {
+        if actions.rebuild {
             self.update_catalogue(true);
         }
-        if extract_now {
+        if actions.extract_now {
             self.auto_unzip(true);
         }
     }
@@ -1634,8 +1722,8 @@ impl App {
         if self.settings.dir != self.saved_settings.dir {
             self.manifest = Arc::new(Mutex::new(Manifest::load(&self.settings.dir)));
         }
-        if self.settings.dark != self.saved_settings.dark || self.settings.zoom != self.saved_settings.zoom {
-            theme::apply(ctx, self.settings.dark, self.settings.zoom);
+        if self.settings.theme != self.saved_settings.theme || self.settings.zoom != self.saved_settings.zoom {
+            theme::apply(ctx, self.settings.theme, self.settings.zoom);
         }
         self.settings.save();
         self.saved_settings = self.settings.clone();
@@ -1643,7 +1731,7 @@ impl App {
 }
 
 /// A status-bar link with an optional brand icon, tinted like a hyperlink.
-fn link(ui: &mut egui::Ui, icon: Option<egui::ImageSource<'static>>, text: &str, url: &str, tip: &str) {
+fn web_link(ui: &mut egui::Ui, icon: Option<egui::ImageSource<'static>>, text: &str, url: &str, tip: &str) {
     let color = ui.visuals().hyperlink_color;
     let label = RichText::new(text).color(color);
     let button = match icon {
@@ -1656,27 +1744,259 @@ fn link(ui: &mut egui::Ui, icon: Option<egui::ImageSource<'static>>, text: &str,
     }
 }
 
-/// A titled, rounded section.
-fn card(ui: &mut egui::Ui, title: &str, add: impl FnOnce(&mut egui::Ui)) {
+#[derive(Default)]
+struct SettingsActions {
+    rebuild: bool,
+    extract_now: bool,
+}
+
+/// A full-width settings card with a large title and a short description.
+fn settings_card(ui: &mut egui::Ui, width: f32, title: &str, about: &str, add: impl FnOnce(&mut egui::Ui)) {
     egui::Frame::new()
         .fill(ui.visuals().faint_bg_color)
         .stroke(ui.visuals().widgets.noninteractive.bg_stroke)
-        .corner_radius(CornerRadius::same(10))
-        .inner_margin(egui::Margin::same(10))
-        .outer_margin(egui::Margin::symmetric(0, 4))
+        .corner_radius(CornerRadius::same(12))
+        .inner_margin(egui::Margin::same(18))
+        .outer_margin(egui::Margin { left: 0, right: 0, top: 0, bottom: 16 })
         .show(ui, |ui| {
+            ui.set_width(width - 38.0);
             ui.vertical(|ui| {
-                ui.label(RichText::new(title).strong().color(theme::ACCENT_HOVER));
-                ui.add_space(2.0);
+                ui.label(RichText::new(title).size(19.0).strong().color(theme::accent_hover()));
+                ui.label(RichText::new(about).size(13.5).weak());
+                ui.add_space(10.0);
+                ui.spacing_mut().item_spacing.y = 10.0;
                 add(ui);
             });
         });
 }
 
+/// One setting: a label and description on the left, its control on the right.
+fn setting_row(ui: &mut egui::Ui, label: &str, about: &str, control: impl FnOnce(&mut egui::Ui)) {
+    ui.separator();
+    ui.horizontal(|ui| {
+        ui.vertical(|ui| {
+            ui.spacing_mut().item_spacing.y = 2.0;
+            ui.label(RichText::new(label).size(15.5).strong());
+            if !about.is_empty() {
+                ui.label(RichText::new(about).size(13.0).weak());
+            }
+        });
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), control);
+    });
+}
+
+/// A row of pill buttons for picking one option.
+fn segmented<T: PartialEq + Copy>(ui: &mut egui::Ui, value: &mut T, options: &[(T, &str)]) -> bool {
+    let mut changed = false;
+    // Laid out right to left by the caller, so add the options in reverse.
+    for (option, label) in options.iter().rev() {
+        let on = *value == *option;
+        let text = if on { RichText::new(*label).size(14.5).color(Color32::WHITE).strong() } else { RichText::new(*label).size(14.5) };
+        let fill = if on { theme::accent() } else { ui.visuals().widgets.inactive.bg_fill };
+        let button = egui::Button::new(text).fill(fill).corner_radius(CornerRadius::same(14)).min_size(vec2(0.0, 32.0));
+        if ui.add(button).clicked() && !on {
+            *value = *option;
+            changed = true;
+        }
+    }
+    changed
+}
+
+fn library_card(ui: &mut egui::Ui, s: &mut Settings, width: f32, busy: bool, example: Option<&Chart>, actions: &mut SettingsActions) {
+    let _ = actions;
+    settings_card(ui, width, "📁  Chart library", "Where Rainbow puts the charts it downloads.", |ui| {
+        setting_row(ui, "Songs folder", "Point this at your Clone Hero or YARG songs folder.", |ui| {
+            if ui.add_enabled(!busy, theme::primary("Choose…").min_size(vec2(0.0, 32.0))).clicked()
+                && let Some(dir) = rfd::FileDialog::new().set_directory(&s.dir).pick_folder()
+            {
+                s.dir = dir;
+            }
+            if ui.add(egui::Button::new(RichText::new("📂 Open").size(14.5)).min_size(vec2(0.0, 32.0))).clicked() {
+                open_folder(&s.dir);
+            }
+        });
+        egui::Frame::new()
+            .fill(ui.visuals().extreme_bg_color)
+            .corner_radius(CornerRadius::same(8))
+            .inner_margin(egui::Margin::symmetric(10, 8))
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.add(egui::Label::new(RichText::new(s.dir.display().to_string()).monospace().size(13.5)).truncate());
+            });
+        setting_row(
+            ui,
+            "Chart folder name",
+            "Use {name} {artist} {album} {genre} {year} {charter}, and / for subfolders.",
+            |_| {},
+        );
+        ui.add(
+            egui::TextEdit::singleline(&mut s.folder_name)
+                .font(egui::FontId::proportional(15.0))
+                .margin(egui::Margin::symmetric(10, 7))
+                .desired_width(f32::INFINITY),
+        );
+        if let Some(example) = example {
+            ui.label(RichText::new(format!("e.g.  {}", api::resolve_folder_name(&s.folder_name, example))).size(13.0).weak());
+        }
+    });
+}
+
+fn downloads_card(ui: &mut egui::Ui, s: &mut Settings, width: f32, busy: bool, actions: &mut SettingsActions) {
+    settings_card(ui, width, "⬇  Downloads", "How charts are saved, and how politely bulk downloads run.", |ui| {
+        ui.add_enabled_ui(!busy, |ui| {
+            setting_row(ui, "Format", ".sng is one file per chart. Chart Folder unpacks it with song.ini.", |ui| {
+                segmented(ui, &mut s.format, &[(DownloadFormat::Sng, ".sng"), (DownloadFormat::Folder, "Chart Folder")]);
+            });
+            setting_row(ui, "Video backgrounds", "Much larger downloads. Off gets the no-video version.", |ui| {
+                theme::checkbox(ui, &mut s.video, "");
+            });
+        });
+        setting_row(ui, "Wait between bulk downloads", "Encore is donation-funded, so please keep this reasonable.", |ui| {
+            ui.add(egui::Slider::new(&mut s.delay_secs, 0.5..=10.0).suffix(" s"));
+        });
+        setting_row(ui, "Extract .zip files automatically", "Unpack zips that appear in your songs folder (e.g. from other sites).", |ui| {
+            theme::checkbox(ui, &mut s.auto_extract, "");
+        });
+        ui.add_enabled_ui(s.auto_extract, |ui| {
+            setting_row(ui, "Delete zips after extracting", &format!("Otherwise they're moved to {}.", unzip::DONE_DIR), |ui| {
+                theme::checkbox(ui, &mut s.delete_zips, "");
+            });
+        });
+        if ui.add(egui::Button::new(RichText::new("📦  Extract zips now").size(14.5)).min_size(vec2(0.0, 32.0))).clicked() {
+            actions.extract_now = true;
+        }
+    });
+}
+
+fn appearance_card(ui: &mut egui::Ui, s: &mut Settings, width: f32) {
+    settings_card(ui, width, "🎨  Appearance", "Theme, size and what the results table shows.", |ui| {
+        setting_row(ui, "Theme", "Colours for the whole app.", |_| {});
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing = vec2(10.0, 10.0);
+            for kind in theme::ThemeKind::ALL {
+                if theme_swatch(ui, kind, s.theme == kind).clicked() {
+                    s.theme = kind;
+                }
+            }
+        });
+        setting_row(ui, "Zoom", "Makes everything bigger or smaller.", |ui| {
+            if ui.add(egui::Button::new(RichText::new("➕").size(15.0)).min_size(vec2(34.0, 32.0))).on_hover_text("Zoom in").clicked() {
+                s.zoom = (s.zoom + 0.1).min(2.5);
+            }
+            ui.label(RichText::new(format!("{:.0}%", s.zoom * 100.0)).size(15.0).strong());
+            if ui.add(egui::Button::new(RichText::new("➖").size(15.0)).min_size(vec2(34.0, 32.0))).on_hover_text("Zoom out").clicked() {
+                s.zoom = (s.zoom - 0.1).max(0.5);
+            }
+        });
+        setting_row(ui, "Row size", "Drag the cover column's edge to fine-tune.", |ui| {
+            if segmented(ui, &mut s.density, &[(Density::Compact, "Compact"), (Density::Default, "Default"), (Density::Large, "Large")]) {
+                s.cover_size = s.density.cover_size();
+            }
+        });
+        setting_row(ui, "Table columns", "Columns also hide automatically when the window is narrow.", |_| {});
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing = vec2(18.0, 10.0);
+            let c = &mut s.columns;
+            for (on, label) in [
+                (&mut c.cover, "Cover"),
+                (&mut c.artist, "Artist"),
+                (&mut c.album, "Album"),
+                (&mut c.genre, "Genre"),
+                (&mut c.year, "Year"),
+                (&mut c.charter, "Charter"),
+                (&mut c.length, "Length"),
+                (&mut c.difficulty, "Difficulty"),
+                (&mut c.uploaded, "Upload Date"),
+            ] {
+                theme::checkbox(ui, on, label);
+            }
+        });
+    });
+}
+
+fn catalogue_card(ui: &mut egui::Ui, s: &mut Settings, width: f32, building: bool, actions: &mut SettingsActions) {
+    settings_card(ui, width, "📚  Catalogue", "Rainbow's local copy of Encore's chart list, for instant search.", |ui| {
+        let size = std::fs::metadata(catalogue::path()).map(|m| m.len()).unwrap_or(0);
+        ui.label(RichText::new(format!("{}  ·  {:.1} MB", catalogue::path().display(), size as f64 / 1_048_576.0)).size(13.0).weak());
+        setting_row(ui, "Check for new charts on startup", "The ⟳ button in the status bar works any time.", |ui| {
+            let text = match s.refresh_after_hours {
+                None => "Never",
+                Some(0) => "Every launch",
+                Some(12) => "After 12 hours",
+                Some(24) => "After 1 day",
+                Some(168) => "After 1 week",
+                Some(_) => "Custom",
+            };
+            egui::ComboBox::from_id_salt("refresh").selected_text(RichText::new(text).size(14.5)).width(170.0).show_ui(ui, |ui| {
+                ui.selectable_value(&mut s.refresh_after_hours, Some(0), "Every launch");
+                ui.selectable_value(&mut s.refresh_after_hours, Some(12), "After 12 hours");
+                ui.selectable_value(&mut s.refresh_after_hours, Some(24), "After 1 day");
+                ui.selectable_value(&mut s.refresh_after_hours, Some(168), "After 1 week");
+                ui.selectable_value(&mut s.refresh_after_hours, None, "Never");
+            });
+        });
+        setting_row(ui, "Rebuild from scratch", "Re-downloads the whole chart list (about 5 minutes).", |ui| {
+            if ui.add_enabled(!building, egui::Button::new(RichText::new("⟳ Rebuild").size(14.5)).min_size(vec2(0.0, 32.0))).clicked() {
+                actions.rebuild = true;
+            }
+        });
+    });
+}
+
+/// A clickable preview of a theme: its background, a few surfaces and its accent.
+fn theme_swatch(ui: &mut egui::Ui, kind: theme::ThemeKind, selected: bool) -> egui::Response {
+    let pal = kind.palette();
+    let (rect, resp) = ui.allocate_exact_size(vec2(112.0, 70.0), Sense::click());
+    let painter = ui.painter();
+    let r = CornerRadius::same(10);
+    painter.rect_filled(rect, r, pal.panel);
+    let bar = egui::Rect::from_min_size(rect.min + vec2(10.0, 10.0), vec2(rect.width() - 20.0, 10.0));
+    painter.rect_filled(bar, CornerRadius::same(5), pal.raised);
+    let pill = egui::Rect::from_min_size(rect.min + vec2(10.0, 26.0), vec2(40.0, 12.0));
+    painter.rect_filled(pill, CornerRadius::same(6), pal.accent);
+    let pill2 = egui::Rect::from_min_size(rect.min + vec2(56.0, 26.0), vec2(28.0, 12.0));
+    painter.rect_filled(pill2, CornerRadius::same(6), pal.hover);
+    painter.text(rect.left_bottom() + vec2(10.0, -10.0), egui::Align2::LEFT_BOTTOM, kind.name(), egui::FontId::proportional(13.0), pal.text);
+    let stroke = if selected {
+        egui::Stroke::new(2.5, theme::accent())
+    } else if resp.hovered() {
+        egui::Stroke::new(1.5, theme::accent_hover())
+    } else {
+        egui::Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color)
+    };
+    painter.rect_stroke(rect, r, stroke, egui::StrokeKind::Inside);
+    resp.on_hover_text(kind.name())
+}
+
+/// A vertical scroll area that uses Rainbow's chunky scroll bar instead of egui's.
+fn fancy_scroll<R>(ui: &mut egui::Ui, id: &str, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    let full = ui.available_rect_before_wrap();
+    let area = full.with_max_x(full.right() - theme::SCROLLBAR_W - 6.0);
+    let mut child = ui.new_child(egui::UiBuilder::new().max_rect(area));
+    let out = egui::ScrollArea::vertical()
+        .id_salt(id)
+        .auto_shrink([false, false])
+        .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
+        .show(&mut child, add);
+    let bar = egui::Rect::from_min_max(
+        egui::pos2(full.right() - theme::SCROLLBAR_W, out.inner_rect.top()),
+        egui::pos2(full.right(), out.inner_rect.bottom()),
+    );
+    let view = out.inner_rect.height();
+    if let Some(offset) = theme::scrollbar(ui, bar, out.id.with("bar"), out.state.offset.y, out.content_size.y, view) {
+        let mut state = out.state;
+        state.offset.y = offset;
+        state.store(ui.ctx(), out.id);
+        ui.ctx().request_repaint();
+    }
+    ui.advance_cursor_after_rect(full);
+    out.inner
+}
+
 /// A toggle-style rounded button.
 fn pill(ui: &mut egui::Ui, on: bool, text: &str) -> egui::Response {
     let text = if on { RichText::new(text).color(Color32::WHITE).strong() } else { RichText::new(text) };
-    let fill = if on { ACCENT } else { ui.visuals().widgets.inactive.bg_fill };
+    let fill = if on { theme::accent() } else { ui.visuals().widgets.inactive.bg_fill };
     ui.add(egui::Button::new(text).fill(fill).corner_radius(CornerRadius::same(14)))
 }
 
@@ -1713,12 +2033,27 @@ fn tag_color(s: &str) -> Color32 {
     theme::RAINBOW[(h % theme::RAINBOW.len() as u32) as usize]
 }
 
+/// Text that acts as a link: underlined on hover, with a pointer cursor. Returns true if clicked.
+fn link(ui: &mut egui::Ui, text: RichText, tip: &str) -> bool {
+    let resp = ui.add(egui::Label::new(text).sense(Sense::click()).truncate());
+    if resp.hovered() {
+        let y = resp.rect.bottom() - 1.0;
+        ui.painter().hline(resp.rect.x_range(), y, egui::Stroke::new(1.0, theme::accent_hover()));
+        ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
+    }
+    resp.on_hover_text(tip).clicked()
+}
+
 /// Difficulty for the chosen instrument as dots, or a compact per-instrument summary.
-fn difficulty_cell(ui: &mut egui::Ui, c: &Chart, instrument: Option<u8>) {
+/// Clicking one shows that instrument's charts at that intensity.
+fn difficulty_cell(ui: &mut egui::Ui, c: &Chart, instrument: Option<u8>, nav: &mut Option<Nav>) {
     if let Some(i) = instrument {
         let d = c.diffs[i as usize];
         if d >= 0 {
-            ui.label(theme::difficulty_dots(d));
+            let resp = ui.add(egui::Label::new(theme::difficulty_dots(d)).sense(Sense::click()));
+            if resp.on_hover_text(format!("Intensity {d}: show more like this")).clicked() {
+                *nav = Some(Nav::Difficulty(i, d));
+            }
         }
         return;
     }
@@ -1726,14 +2061,17 @@ fn difficulty_cell(ui: &mut egui::Ui, c: &Chart, instrument: Option<u8>) {
         let d = c.diffs[k];
         if d >= 0 {
             let color = theme::RAINBOW[[3, 3, 2, 2, 1, 0, 0][d.clamp(0, 6) as usize]];
-            ui.label(RichText::new(format!("{label}{d}")).color(color).small().strong())
-                .on_hover_text(format!("{}: {d}", INSTRUMENTS[k].1));
+            let tip = format!("{} intensity {d}: show more like this", INSTRUMENTS[k].1);
+            if link(ui, RichText::new(format!("{label}{d}")).color(color).small().strong(), &tip) {
+                *nav = Some(Nav::Difficulty(k as u8, d));
+            }
         }
     }
 }
 
 /// Icon tags for a table row: downloaded/broken status, source game, instruments and features.
-fn tags(ui: &mut egui::Ui, c: &Chart, downloaded: bool) {
+/// Game, instrument and feature icons are clickable.
+fn tags(ui: &mut egui::Ui, c: &Chart, downloaded: bool, nav: &mut Option<Nav>) {
     ui.spacing_mut().item_spacing.x = 4.0;
     if downloaded {
         ui.colored_label(GREEN, "✔").on_hover_text("Downloaded");
@@ -1741,26 +2079,30 @@ fn tags(ui: &mut egui::Ui, c: &Chart, downloaded: bool) {
     if c.has(flag::BROKEN) {
         ui.colored_label(RED, "⚠").on_hover_text("Encore reports this chart as unplayable");
     }
-    if let Some(g) = games::game_key(c.icon.as_deref()) {
-        ui.colored_label(AMBER, "🏆").on_hover_text(games::game_name(&g));
+    if let Some(g) = games::game_key(c.icon.as_deref())
+        && link(ui, RichText::new("🏆").color(AMBER), &format!("{}: show this game's charts", games::game_name(&g)))
+    {
+        *nav = Some(Nav::Game(g));
     }
-    let mut icons: Vec<&str> = Vec::new();
-    for (k, _) in INSTRUMENTS.iter().enumerate() {
+    let mut shown: Vec<&str> = Vec::new();
+    for (k, (_, name, _)) in INSTRUMENTS.iter().enumerate() {
         if c.diffs[k] >= 0 || c.notes.iter().any(|s| s.i == k as u8) {
             let icon = instrument_icon(k as u8);
-            if !icons.contains(&icon) {
-                icons.push(icon);
+            if shown.contains(&icon) {
+                continue;
+            }
+            shown.push(icon);
+            if link(ui, RichText::new(icon), &format!("{name}: show charts for this instrument")) {
+                *nav = Some(Nav::Instrument(k as u8));
             }
         }
     }
-    for icon in icons {
-        ui.label(icon);
-    }
-    feature_tags(ui, c, false);
+    feature_tags(ui, c, false, nav);
 }
 
 /// Feature tags; `full` shows labelled chips (details panel), otherwise just icons.
-fn feature_tags(ui: &mut egui::Ui, c: &Chart, full: bool) -> bool {
+/// Clicking one shows charts with that feature.
+fn feature_tags(ui: &mut egui::Ui, c: &Chart, full: bool, nav: &mut Option<Nav>) -> bool {
     let features = [
         (flag::VIDEO, "🎬", "Video", theme::RAINBOW[4]),
         (flag::LYRICS, "📝", "Lyrics", theme::RAINBOW[2]),
@@ -1781,10 +2123,18 @@ fn feature_tags(ui: &mut egui::Ui, c: &Chart, full: bool) -> bool {
             continue;
         }
         any = true;
-        if full {
-            theme::chip(ui, &format!("{icon} {label}"), color);
+        let clickable = bit != flag::BROKEN;
+        let tip = format!("{label}: show charts with this");
+        let clicked = if full {
+            let resp = theme::chip(ui, &format!("{icon} {label}"), color);
+            if clickable { resp.on_hover_text(&tip).clicked() } else { false }
         } else if !matches!(bit, flag::ISSUES | flag::BROKEN | flag::FORCED | flag::OPEN | flag::TAP) {
-            ui.label(RichText::new(icon).color(color)).on_hover_text(label);
+            link(ui, RichText::new(icon).color(color), &tip)
+        } else {
+            false
+        };
+        if clicked && clickable {
+            *nav = Some(Nav::Feature(bit));
         }
     }
     any
@@ -1834,6 +2184,7 @@ impl eframe::App for App {
                 let search = egui::Panel::top("search").show(ui, |ui| {
                     ui.add_space(8.0);
                     self.search_bar(ui);
+                    self.active_filters(ui);
                     ui.add_space(8.0);
                 });
                 self.search_bottom = search.response.rect.bottom();
