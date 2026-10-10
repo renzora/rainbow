@@ -41,6 +41,8 @@ const BULK: usize = 50;
 /// While the catalogue is incomplete, ask Encore directly once typing pauses this long.
 const LIVE_SEARCH_DEBOUNCE: Duration = Duration::from_millis(350);
 const LOGO_PNG: &[u8] = include_bytes!("../assets/icon-256.png");
+const RENZORA_PNG: &[u8] = include_bytes!("../assets/renzora.png");
+const RENZORA_URL: &str = "https://github.com/renzora";
 
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
@@ -158,6 +160,7 @@ struct App {
     saved_settings: Settings,
     tab: Tab,
     logo: Option<egui::TextureHandle>,
+    renzora: Option<egui::TextureHandle>,
     covers: Covers,
 
     // Every chart we know about: the catalogue (complete or still downloading) plus any
@@ -238,6 +241,11 @@ impl App {
             let color = egui::ColorImage::from_rgba_unmultiplied([img.width() as usize, img.height() as usize], img.as_raw());
             ctx.load_texture("logo", color, egui::TextureOptions::LINEAR)
         });
+        let renzora = image::load_from_memory(RENZORA_PNG).ok().map(|img| {
+            let img = img.to_rgba8();
+            let color = egui::ColorImage::from_rgba_unmultiplied([img.width() as usize, img.height() as usize], img.as_raw());
+            ctx.load_texture("renzora", color, egui::TextureOptions::LINEAR)
+        });
         let mut app = Self {
             client,
             tx,
@@ -247,6 +255,7 @@ impl App {
             settings,
             tab: Tab::Browse,
             logo,
+            renzora,
             covers: Covers::new(ctx),
             charts: Vec::new(),
             known: HashSet::new(),
@@ -834,6 +843,8 @@ impl App {
                 }
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                credit(ui, self.renzora.as_ref(), 30.0);
+                ui.add_space(12.0);
                 if let Some(job) = &self.job {
                     ui.add(egui::ProgressBar::new(job.checked as f32 / job.total.max(1) as f32).desired_width(140.0).show_percentage());
                     ui.label(RichText::new(format!("⬇ {}", job.downloaded)).color(theme::good()));
@@ -2117,7 +2128,17 @@ impl App {
                 }
             });
             ui.add_space(8.0);
-            ui.vertical_centered(|ui| ui.weak(concat!("Rainbow v", env!("CARGO_PKG_VERSION"))));
+            let renzora = self.renzora.clone();
+            ui.vertical_centered(|ui| {
+                if let Some(tex) = &renzora {
+                    let logo = ui.add(egui::Image::new(tex).fit_to_exact_size(vec2(56.0 * 110.0 / 128.0, 56.0)).sense(Sense::click()));
+                    if logo.on_hover_text(RENZORA_URL).clicked() {
+                        ui.ctx().open_url(egui::OpenUrl::new_tab(RENZORA_URL));
+                    }
+                }
+                ui.label(RichText::new("Created by Renzora Studios").strong().size(15.0));
+                ui.weak(concat!("Rainbow v", env!("CARGO_PKG_VERSION")));
+            });
             ui.add_space(12.0);
         });
         if actions.rebuild {
@@ -2151,6 +2172,21 @@ impl App {
         }
         self.settings.save();
         self.saved_settings = self.settings.clone();
+    }
+}
+
+/// "Created by Renzora Studios" with the studio's logo; links to its GitHub.
+fn credit(ui: &mut egui::Ui, logo: Option<&egui::TextureHandle>, height: f32) {
+    let text = RichText::new("Created by Renzora Studios").size(13.0).color(ui.visuals().weak_text_color());
+    let resp = match logo {
+        Some(tex) => {
+            let image = egui::Image::new(tex).fit_to_exact_size(vec2(height * 110.0 / 128.0, height));
+            ui.add(egui::Button::image_and_text(image, text).frame(false))
+        }
+        None => ui.add(egui::Button::new(text).frame(false)),
+    };
+    if resp.on_hover_text(RENZORA_URL).clicked() {
+        ui.ctx().open_url(egui::OpenUrl::new_tab(RENZORA_URL));
     }
 }
 

@@ -65,6 +65,10 @@ keep bulk-download delays reasonable, and consider
 Questions about Encore itself? Join the [Encore Discord](https://discord.gg/cqaUXGm).
 Rainbow is not affiliated with Chorus Encore or Bridge.
 
+## Credits
+
+Created by [Renzora Studios](https://github.com/renzora).
+
 ## License
 
 MIT
