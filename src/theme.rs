@@ -219,3 +219,26 @@ pub fn checkbox_ex(ui: &mut egui::Ui, checked: &mut bool, text: &str, indetermin
     }
     resp
 }
+
+/// A floating "Back to top" pill with a drawn arrow.
+pub fn back_to_top(ui: &mut egui::Ui) -> egui::Response {
+    let galley = ui.painter().layout_no_wrap("Back to top".to_owned(), FontId::proportional(14.0), Color32::WHITE);
+    let (pad, arrow_w, gap, height) = (18.0, 12.0, 8.0, 38.0);
+    let size = egui::vec2(pad * 2.0 + arrow_w + gap + galley.size().x, height);
+    let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::click());
+    let painter = ui.painter();
+    let radius = CornerRadius::same((height / 2.0) as u8);
+    painter.add(ui.visuals().popup_shadow.as_shape(rect, radius));
+    painter.rect_filled(rect, radius, if resp.hovered() { ACCENT_HOVER } else { ACCENT });
+
+    let c = egui::pos2(rect.left() + pad + arrow_w / 2.0, rect.center().y);
+    let stroke = Stroke::new(2.2, Color32::WHITE);
+    painter.line_segment([c + egui::vec2(0.0, 7.0), c + egui::vec2(0.0, -7.0)], stroke);
+    painter.add(egui::Shape::line(
+        vec![c + egui::vec2(-6.0, -1.0), c + egui::vec2(0.0, -7.0), c + egui::vec2(6.0, -1.0)],
+        stroke,
+    ));
+    let text_pos = egui::pos2(rect.left() + pad + arrow_w + gap, rect.center().y - galley.size().y / 2.0);
+    painter.galley(text_pos, galley, Color32::WHITE);
+    resp
+}

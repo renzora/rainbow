@@ -1130,13 +1130,16 @@ impl App {
 
         // Floating "back to top" button once the list is scrolled down.
         if scroll.state.offset.y > 300.0 {
-            let pos = scroll.inner_rect.right_bottom() - vec2(64.0, 60.0);
-            egui::Area::new(egui::Id::new("scroll_top")).order(egui::Order::Foreground).fixed_pos(pos).show(ui.ctx(), |ui| {
-                let button = theme::primary("⬆").corner_radius(CornerRadius::same(22)).min_size(vec2(44.0, 44.0));
-                if ui.add(button).on_hover_text("Back to top").clicked() {
-                    self.scroll_to_top = true;
-                }
-            });
+            let pos = egui::pos2(scroll.inner_rect.center().x, scroll.inner_rect.bottom() - 18.0);
+            egui::Area::new(egui::Id::new("scroll_top"))
+                .order(egui::Order::Foreground)
+                .pivot(egui::Align2::CENTER_BOTTOM)
+                .fixed_pos(pos)
+                .show(ui.ctx(), |ui| {
+                    if theme::back_to_top(ui).clicked() {
+                        self.scroll_to_top = true;
+                    }
+                });
         }
 
         // The cover column was resized: scale the covers (and rows) to match.
