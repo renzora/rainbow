@@ -536,29 +536,40 @@ pub fn unique_path(dir: &Path, stem: &str, ext: &str) -> PathBuf {
     path
 }
 
-/// md5s already downloaded into a folder, so they're skipped next time.
+/// Charts already downloaded into a folder (md5 -> where it was saved), so they're skipped
+/// next time and can be shown in the file manager.
 pub struct Manifest {
-    pub seen: HashSet<String>,
+    files: std::collections::HashMap<String, PathBuf>,
     path: PathBuf,
 }
+
+/// Separates the md5 and the saved path on each line of the download list.
+const SEP: char = '\t';
 
 impl Manifest {
     pub fn load(dir: &Path) -> Self {
         let path = dir.join(MANIFEST);
-        let seen = match File::open(&path) {
+        let files = match File::open(&path) {
             Ok(f) => BufReader::new(f)
                 .lines()
                 .map_while(Result::ok)
-                .filter_map(|l| l.split('\t').next().map(str::to_owned))
-                .filter(|s| !s.is_empty())
+                .filter_map(|l| {
+                    let (md5, file) = l.split_once(SEP).unwrap_or((&l, ""));
+                    (!md5.is_empty()).then(|| (md5.to_owned(), PathBuf::from(file)))
+                })
                 .collect(),
-            Err(_) => HashSet::new(),
+            Err(_) => std::collections::HashMap::new(),
         };
-        Self { seen, path }
+        Self { files, path }
     }
 
     pub fn contains(&self, md5: &str) -> bool {
-        self.seen.contains(md5)
+        self.files.contains_key(md5)
+    }
+
+    /// Where a downloaded chart was saved, if it's still there.
+    pub fn location(&self, md5: &str) -> Option<PathBuf> {
+        self.files.get(md5).filter(|p| !p.as_os_str().is_empty() && p.exists()).cloned()
     }
 
     pub fn add(&mut self, chart: &Chart, file: &Path) -> Result<()> {
@@ -566,8 +577,8 @@ impl Manifest {
             fs::create_dir_all(dir)?;
         }
         let mut f = OpenOptions::new().create(true).append(true).open(&self.path)?;
-        writeln!(f, "{}\t{}", chart.md5, file.display())?;
-        self.seen.insert(chart.md5.clone());
+        writeln!(f, "{}{SEP}{}", chart.md5, file.display())?;
+        self.files.insert(chart.md5.clone(), file.to_path_buf());
         Ok(())
     }
 }

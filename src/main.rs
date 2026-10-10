@@ -137,6 +137,7 @@ enum RowAction {
     Toggle(usize),
     Download(usize),
     Preview(usize),
+    Reveal(usize),
     Nav(Nav),
 }
 
@@ -566,6 +567,18 @@ impl App {
             return false;
         }
         true
+    }
+
+    /// Shows a downloaded chart in the file manager (or the songs folder if it's moved).
+    fn reveal_chart(&mut self, md5: &str) {
+        let location = self.manifest.lock().unwrap().location(md5);
+        match location {
+            Some(path) => reveal(&path),
+            None => {
+                self.log("That chart isn't where it was saved any more; opening the songs folder".to_owned());
+                open_folder(&self.settings.dir);
+            }
+        }
     }
 
     fn shortcuts_window(&mut self, ctx: &egui::Context) {
@@ -1050,8 +1063,25 @@ impl App {
                             let field_w = inner - 110.0;
                             egui::Grid::new("adv_misc").num_columns(2).spacing([8.0, 5.0]).show(ui, |ui| {
                                 ui.label("Modified after").on_hover_text("The date of the last time this chart was modified in Google Drive.");
-                                let resp = ui.add_sized([field_w, 24.0], egui::TextEdit::singleline(&mut f.modified_after).hint_text("YYYY-MM-DD"));
-                                text_menu(&resp, &mut f.modified_after);
+                                ui.horizontal(|ui| {
+                                    // Type a date, or pick one from the calendar popup.
+                                    let clear_w = if f.modified_after.is_empty() { 0.0 } else { 30.0 };
+                                    let text_w = (field_w - 48.0 - clear_w).max(80.0);
+                                    let resp = ui.add_sized([text_w, 24.0], egui::TextEdit::singleline(&mut f.modified_after).hint_text("YYYY-MM-DD"));
+                                    text_menu(&resp, &mut f.modified_after);
+                                    let mut date = f.modified_after.trim().parse::<jiff::civil::Date>().unwrap_or_else(|_| jiff::Zoned::now().date());
+                                    let picker = egui_extras::DatePickerButton::new(&mut date)
+                                        .id_salt("modified_after")
+                                        .format("")
+                                        .show_icon(true)
+                                        .calendar_week(false);
+                                    if ui.add(picker).on_hover_text("Pick a date").changed() {
+                                        f.modified_after = date.to_string();
+                                    }
+                                    if !f.modified_after.is_empty() && ui.small_button("✖").on_hover_text("Clear the date").clicked() {
+                                        f.modified_after.clear();
+                                    }
+                                });
                                 ui.end_row();
                                 ui.label("Hash").on_hover_text("The MD5 hash of the chart folder or .sng file. You can enter multiple values if they are separated by commas.");
                                 let resp = ui.add_sized([field_w, 24.0], egui::TextEdit::singleline(&mut f.hash).hint_text("md5, md5, …"));
@@ -1689,7 +1719,8 @@ impl App {
                         });
                     }
                     let resp = row.response();
-                    resp.context_menu(|ui| row_context_menu(ui, c, i, is_checked, &mut row_menu));
+                    let have = manifest.contains(&c.md5);
+                    resp.context_menu(|ui| row_context_menu(ui, c, i, is_checked, have, &mut row_menu));
                     // Screen readers announce the row as the song.
                     resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, true, is_checked, c.title()));
                     if resp.hovered() {
@@ -1764,6 +1795,10 @@ impl App {
             Some(RowAction::Preview(i)) => {
                 let c = self.charts[self.results[i]].clone();
                 self.preview = Some(preview::Preview::open(&self.client, &c, ui.ctx(), self.filters.instrument, self.filters.difficulty));
+            }
+            Some(RowAction::Reveal(i)) => {
+                let md5 = self.charts[self.results[i]].md5.clone();
+                self.reveal_chart(&md5);
             }
             Some(RowAction::Nav(n)) => self.navigate(n),
             None => {}
@@ -1893,13 +1928,17 @@ impl App {
 
             ui.add_space(10.0);
             // Download and Preview side by side, half the panel each.
-            let (mut download, mut open_preview) = (false, false);
+            let (mut download, mut open_preview, mut reveal_it) = (false, false, false);
             let half = ((ui.available_width() - ui.spacing().item_spacing.x) / 2.0).max(60.0);
             let busy = self.job.is_some();
             ui.horizontal(|ui| {
                 if downloaded {
-                    let text = RichText::new("✔ Downloaded").strong().color(theme::good());
-                    ui.add_sized([half, 34.0], egui::Label::new(text));
+                    let good = theme::good();
+                    let button = egui::Button::new(RichText::new("📂  Show in folder").strong().color(good))
+                        .fill(good.linear_multiply(0.15))
+                        .stroke(egui::Stroke::new(1.0, good.linear_multiply(0.7)))
+                        .min_size(vec2(half, 34.0));
+                    reveal_it = ui.add(button).on_hover_text("Downloaded ✔  Open it in your file manager").clicked();
                 } else {
                     download = ui.add_enabled(!busy, theme::download_button("⬇  Download").min_size(vec2(half, 34.0))).clicked();
                 }
@@ -1910,6 +1949,9 @@ impl App {
             });
             if download {
                 self.start_download(c.title(), vec![c.clone()]);
+            }
+            if reveal_it {
+                self.reveal_chart(&c.md5);
             }
             if open_preview {
                 self.preview = Some(preview::Preview::open(&self.client, &c, ui.ctx(), self.filters.instrument, self.filters.difficulty));
@@ -2473,7 +2515,7 @@ fn tag_color(s: &str) -> Color32 {
 }
 
 /// Right-click menu for a result row.
-fn row_context_menu(ui: &mut egui::Ui, c: &Chart, i: usize, checked: bool, action: &mut Option<RowAction>) {
+fn row_context_menu(ui: &mut egui::Ui, c: &Chart, i: usize, checked: bool, downloaded: bool, action: &mut Option<RowAction>) {
     ui.set_min_width(210.0);
     let mut pick = |ui: &mut egui::Ui, label: &str, a: RowAction| {
         if ui.button(label).clicked() {
@@ -2482,7 +2524,11 @@ fn row_context_menu(ui: &mut egui::Ui, c: &Chart, i: usize, checked: bool, actio
         }
     };
     pick(ui, "ℹ  Show details", RowAction::Details(i));
-    pick(ui, "⬇  Download", RowAction::Download(i));
+    if downloaded {
+        pick(ui, "📂  Show in folder", RowAction::Reveal(i));
+    } else {
+        pick(ui, "⬇  Download", RowAction::Download(i));
+    }
     pick(ui, "▶  Preview", RowAction::Preview(i));
     pick(ui, if checked { "☐  Deselect" } else { "☑  Select" }, RowAction::Toggle(i));
     ui.separator();
@@ -2712,6 +2758,18 @@ fn range_row(ui: &mut egui::Ui, label: &str, r: &mut Range, tip: &str, label_w: 
     let max = ui.add_sized([64.0, 24.0], egui::TextEdit::singleline(&mut r.max).hint_text("Max"));
     text_menu(&max, &mut r.max);
     ui.end_row();
+}
+
+/// Opens the file manager with `path` selected (or its folder, where selecting isn't supported).
+fn reveal(path: &std::path::Path) {
+    if cfg!(target_os = "windows") {
+        let native = path.to_string_lossy().replace('/', "\\");
+        let _ = std::process::Command::new("explorer").arg(format!("/select,{native}")).spawn();
+    } else if cfg!(target_os = "macos") {
+        let _ = std::process::Command::new("open").arg("-R").arg(path).spawn();
+    } else if let Some(parent) = path.parent() {
+        let _ = std::process::Command::new("xdg-open").arg(parent).spawn();
+    }
 }
 
 /// Opens a folder in the system file manager.
