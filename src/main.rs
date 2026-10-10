@@ -2259,7 +2259,12 @@ fn credit(ui: &mut egui::Ui, logo: Option<&egui::TextureHandle>, height: f32) {
     let resp = match logo {
         Some(tex) => {
             let image = egui::Image::new(tex).fit_to_exact_size(vec2(height * 110.0 / 128.0, height));
-            ui.add(egui::Button::image_and_text(image, text).frame(false))
+            // A little room between the avatar and the name.
+            ui.scope(|ui| {
+                ui.spacing_mut().icon_spacing = 9.0;
+                ui.add(egui::Button::image_and_text(image, text).frame(false))
+            })
+            .inner
         }
         None => ui.add(egui::Button::new(text).frame(false)),
     };
