@@ -107,6 +107,14 @@ pub struct Chart {
     /// ISO 8601 time the chart was last modified in Google Drive.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub modified: Option<String>,
+    /// Google Drive ids: the chart's own file (or the pack it's in), the folder holding it,
+    /// and the charter's shared top-level folder.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub drive_file: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub drive_folder: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub drive_root: Option<String>,
     #[serde(default)]
     pub length_ms: Option<u64>,
     #[serde(default)]
@@ -227,7 +235,13 @@ impl Chart {
             icon: text(v, "icon").map(|i| i.to_lowercase()),
             pack: text(v, "packName"),
             modified: text(v, "modifiedTime"),
-            length_ms: v.get("song_length").and_then(Value::as_u64).filter(|&l| l > 0),
+            drive_file: text(v, "driveFileId"),
+            drive_folder: text(v, "parentFolderId"),
+            drive_root: text(v, "applicationDriveId"),
+            length_ms: v
+                .get("song_length")
+                .and_then(Value::as_u64)
+                .filter(|&l| l > 0),
             effective_ms: nd.get("effectiveLength").and_then(Value::as_f64),
             diffs,
             notes,
@@ -394,6 +408,13 @@ impl Client {
             "source": "bridge",
         });
         self.post_search("/search", &body)
+    }
+
+    /// Charts with this md5 or chart hash, straight from Encore (for ones newer than the catalogue).
+    pub fn find_by_hash(&self, hash: &str) -> Result<Vec<Chart>> {
+        let body =
+            json!({ "hash": hash, "per_page": MAX_PER_PAGE, "page": 1, "drumsReviewed": false });
+        Ok(self.post_search("/search/advanced", &body)?.charts)
     }
 
     /// md5s of every chart with one of these track hashes (comma separated).

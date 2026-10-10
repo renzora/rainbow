@@ -5,6 +5,11 @@ use std::sync::RwLock;
 use eframe::egui::{self, Color32, CornerRadius, FontId, Stroke, TextStyle, Visuals};
 use serde::{Deserialize, Serialize};
 
+/// Bundled fonts that are also used outside the UI (e.g. for saving path charts as images).
+pub const NOTO_SANS: &[u8] = include_bytes!("../assets/fonts/NotoSans.ttf");
+pub const NOTO_EMOJI: &[u8] = include_bytes!("../assets/fonts/NotoEmoji.ttf");
+pub const NOTO_SANS_JP: &[u8] = include_bytes!("../assets/fonts/NotoSansJP.ttf");
+
 const GREEN: Color32 = Color32::from_rgb(74, 201, 120);
 const RED: Color32 = Color32::from_rgb(235, 96, 96);
 const AMBER: Color32 = Color32::from_rgb(240, 180, 70);
@@ -444,11 +449,11 @@ pub fn primary(text: impl Into<String>) -> egui::Button<'static> {
     egui::Button::new(egui::RichText::new(text.into()).color(on_accent()).strong()).fill(accent())
 }
 
-/// "Rainbow" in the bold face with a soft pink, lavender and sky-blue gradient across it.
+/// "Rainbow" in the Rainbow Rounded face with a soft pink, lavender and sky-blue gradient across it.
 pub fn title(size: f32) -> egui::text::LayoutJob {
     const STOPS: [Color32; 3] = [rgb(255, 128, 182), rgb(184, 146, 255), rgb(112, 196, 255)];
     let mut job = egui::text::LayoutJob::default();
-    let font = FontId::new(size, egui::FontFamily::Name("bold".into()));
+    let font = FontId::new(size, egui::FontFamily::Name(UiFont::Rounded.key().into()));
     let letters: Vec<char> = "RAINBOW".chars().collect();
     for (i, ch) in letters.iter().enumerate() {
         // Position along the word (0..1), blended between the two nearest stops.
@@ -525,10 +530,10 @@ pub fn install_fonts(ctx: &egui::Context, choice: UiFont, language: &str) {
 
     let mut fonts = egui::FontDefinitions::default();
     for (name, bytes) in [
-        ("noto-sans", &include_bytes!("../assets/fonts/NotoSans.ttf")[..]),
+        ("noto-sans", NOTO_SANS),
         ("noto-sans-bold", &include_bytes!("../assets/fonts/NotoSans-Bold.ttf")[..]),
-        ("noto-emoji", &include_bytes!("../assets/fonts/NotoEmoji.ttf")[..]),
-        ("noto-sans-jp", &include_bytes!("../assets/fonts/NotoSansJP.ttf")[..]),
+        ("noto-emoji", NOTO_EMOJI),
+        ("noto-sans-jp", NOTO_SANS_JP),
         // Only the characters Rainbow's Korean and Chinese translations use (tools/subset_cjk.py).
         ("noto-sans-kr", &include_bytes!("../assets/fonts/NotoSansKR-UI.ttf")[..]),
         ("noto-sans-sc", &include_bytes!("../assets/fonts/NotoSansSC-UI.ttf")[..]),
@@ -657,7 +662,8 @@ pub fn back_to_top(ui: &mut egui::Ui) -> egui::Response {
 /// A filled button in the "good" colour (green, or the colour-blind safe equivalent),
 /// used for downloads.
 pub fn download_button(text: impl Into<String>) -> egui::Button<'static> {
-    let fill = good();
+    // A little darker than the status green, so white text on it is easy to read.
+    let fill = good().lerp_to_gamma(Color32::BLACK, 0.2);
     egui::Button::new(egui::RichText::new(text.into()).color(text_on(fill)).strong()).fill(fill)
 }
 

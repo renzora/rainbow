@@ -6,6 +6,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::api::{Chart, DRUMS, flag};
 use crate::games;
+use crate::query::{self, Cond};
 
 /// Text fields in Bridge's "Search by" order.
 pub const TEXT_FIELDS: [&str; 6] = ["Name", "Artist", "Album", "Genre", "Year", "Charter"];
@@ -180,7 +181,19 @@ impl Index {
 
     /// Indices of matching charts, sorted as requested.
     pub fn search(&self, charts: &[Chart], f: &Filters) -> Vec<usize> {
-        let terms: Vec<String> = f.query.split_whitespace().map(str::to_lowercase).collect();
+        // The search box's syntax ("exact", -exclude, field:value); see `query`. Plain MD5s,
+        // Encore links and Google Drive links find those charts (any of them); other words are text.
+        let (conds, words) = query::parse(&f.query);
+        let (mut query_hashes, mut drive_ids, mut terms) = (Vec::new(), Vec::new(), Vec::new());
+        for word in &words {
+            if let Some(id) = drive_id_in(word) {
+                drive_ids.push(id); // Drive ids are case-sensitive
+            } else if let Some(h) = hash_in(word) {
+                query_hashes.push(h);
+            } else {
+                terms.push(word.to_lowercase());
+            }
+        }
         let text: Vec<(usize, String, bool, bool)> = f
             .text
             .iter()
@@ -206,6 +219,43 @@ impl Index {
                 let fields = &self.fields[i];
                 if !terms.iter().all(|t| self.haystacks[i].contains(t.as_str())) {
                     return false;
+                }
+                for term in &conds {
+                    let hit = match &term.cond {
+                        Cond::Text {
+                            field,
+                            value,
+                            whole,
+                        } => {
+                            let hay =
+                                field.map_or(self.haystacks[i].as_str(), |k| fields[k].as_str());
+                            if *whole {
+                                query::whole_words(hay, value)
+                            } else {
+                                hay.contains(value.as_str())
+                            }
+                        }
+                        cond => query::matches_chart(cond, c, f.instrument),
+                    };
+                    if hit == term.negate {
+                        return false;
+                    }
+                }
+                if !(query_hashes.is_empty() && drive_ids.is_empty()) {
+                    let hash_hit = query_hashes.iter().any(|h| {
+                        c.md5 == *h
+                            || c.chart_hash
+                                .as_ref()
+                                .is_some_and(|ch| ch.eq_ignore_ascii_case(h))
+                    });
+                    let drive_hit = drive_ids.iter().any(|id| {
+                        [&c.drive_file, &c.drive_folder, &c.drive_root]
+                            .iter()
+                            .any(|d| d.as_deref() == Some(id.as_str()))
+                    });
+                    if !hash_hit && !drive_hit {
+                        return false;
+                    }
                 }
                 if f.no_video && c.has(flag::VIDEO) || f.no_broken && c.has(flag::BROKEN) {
                     return false;
@@ -308,6 +358,58 @@ impl Index {
     }
 }
 
+/// The chart MD5 (or chart hash) in a search word: the word itself if it's one, or the one in an
+/// Encore link like `https://www.enchor.us/chart/<md5>` or `files.enchor.us/<md5>_novideo.sng`.
+pub fn hash_in(word: &str) -> Option<String> {
+    let is_hash = |s: &str| s.len() >= 32 && s.bytes().all(|b| b.is_ascii_hexdigit());
+    if is_hash(word) {
+        return Some(word.to_lowercase());
+    }
+    if !word.to_lowercase().contains("enchor.us") {
+        return None;
+    }
+    word.split(|c: char| !c.is_ascii_alphanumeric())
+        .find(|p| is_hash(p))
+        .map(str::to_lowercase)
+}
+
+/// The file or folder id in a Google Drive link: `drive.google.com/file/d/<id>/view`,
+/// `.../drive/folders/<id>`, `.../open?id=<id>`, `.../uc?id=<id>&export=download`, and the
+/// same on `docs.google.com` or `drive.usercontent.google.com`.
+pub fn drive_id_in(word: &str) -> Option<String> {
+    let lower = word.to_lowercase();
+    if !(lower.contains("drive.google.com")
+        || lower.contains("docs.google.com")
+        || lower.contains("drive.usercontent.google.com"))
+    {
+        return None;
+    }
+    let is_id = |s: &str| {
+        s.len() >= 20
+            && s.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    };
+    // ?id=<id> (or &id=<id>)
+    if let Some(i) = lower
+        .find("id=")
+        .filter(|&i| i > 0 && matches!(&lower[i - 1..i], "?" | "&"))
+    {
+        let id: String = word[i + 3..]
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+            .collect();
+        if is_id(&id) {
+            return Some(id);
+        }
+    }
+    // .../d/<id>/..., .../folders/<id>
+    let parts: Vec<&str> = word.split(['/', '?', '#', '&']).collect();
+    parts
+        .windows(2)
+        .find(|w| matches!(w[0], "d" | "folders") && is_id(w[1]))
+        .map(|w| w[1].to_owned())
+}
+
 fn sort_field(s: SortKey) -> usize {
     match s {
         SortKey::Name => 0,
@@ -316,5 +418,52 @@ fn sort_field(s: SortKey) -> usize {
         SortKey::Genre => 3,
         SortKey::Year => 4,
         _ => 5,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::hash_in;
+
+    #[test]
+    fn finds_hashes_in_words_and_encore_links() {
+        let md5 = "2cc7370c95d16a1b2701bfabca131add";
+        assert_eq!(hash_in(md5).as_deref(), Some(md5));
+        assert_eq!(hash_in(&md5.to_uppercase()).as_deref(), Some(md5));
+        assert_eq!(
+            hash_in(&format!("https://www.enchor.us/chart/{md5}")).as_deref(),
+            Some(md5)
+        );
+        assert_eq!(
+            hash_in(&format!("https://files.enchor.us/{md5}_novideo.sng")).as_deref(),
+            Some(md5)
+        );
+        assert_eq!(
+            hash_in(&format!("enchor.us/chart/{md5}?instrument=guitar")).as_deref(),
+            Some(md5)
+        );
+        assert_eq!(hash_in("metallica"), None);
+        assert_eq!(
+            hash_in("https://example.com/2cc7370c95d16a1b2701bfabca131add"),
+            None
+        );
+    }
+
+    #[test]
+    fn finds_ids_in_google_drive_links() {
+        use super::drive_id_in;
+        let id = "1XAT_rzBweGWLSieddXeFn2Zh0Pml2kKM";
+        for link in [
+            format!("https://drive.google.com/file/d/{id}/view?usp=sharing"),
+            format!("https://drive.google.com/drive/folders/{id}"),
+            format!("https://drive.google.com/drive/u/0/folders/{id}?usp=drive_link"),
+            format!("https://drive.google.com/open?id={id}"),
+            format!("https://drive.google.com/uc?export=download&id={id}"),
+            format!("https://drive.usercontent.google.com/download?id={id}&export=download"),
+        ] {
+            assert_eq!(drive_id_in(&link).as_deref(), Some(id), "{link}");
+        }
+        assert_eq!(drive_id_in(id), None);
+        assert_eq!(drive_id_in("https://drive.google.com/drive/my-drive"), None);
     }
 }

@@ -5,7 +5,10 @@ fn main() {
         let mut res = winresource::WindowsResource::new();
         res.set_icon("assets/icon.ico");
         res.set("ProductName", "Rainbow");
-        res.set("FileDescription", "Rainbow - Chorus Encore chart downloader");
+        res.set(
+            "FileDescription",
+            "Rainbow - Chorus Encore chart downloader",
+        );
         res.compile().expect("failed to embed Windows resources");
     }
 }

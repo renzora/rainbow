@@ -1,6 +1,8 @@
 //! The chart preview: a window that plays a chart's notes falling down a highway, like in game.
 //! Visual only (no audio).
 
+use std::collections::HashMap;
+use std::sync::Arc;
 use std::sync::mpsc::{Receiver, channel};
 use std::thread;
 use std::time::Instant;
@@ -10,8 +12,11 @@ use eframe::egui;
 use egui::{Color32, CornerRadius, Pos2, Rect, RichText, Sense, Stroke, pos2, vec2};
 
 use crate::i18n::t;
+use crate::tr;
 use crate::api::{Chart, Client, DIFFICULTIES, INSTRUMENTS};
-use crate::chart::{self, BAR, Kind, Layout, Song, Track};
+use crate::chart::{self, BAR, Kind, Layout, Parsed, Song, Track};
+use crate::optimal::{self, Outcome};
+use crate::pathchart;
 use crate::sng;
 
 const GREEN: Color32 = Color32::from_rgb(40, 190, 70);
@@ -21,14 +26,26 @@ const BLUE: Color32 = Color32::from_rgb(50, 120, 235);
 const ORANGE: Color32 = Color32::from_rgb(245, 135, 30);
 const PURPLE: Color32 = Color32::from_rgb(175, 80, 225);
 const STAR: Color32 = Color32::from_rgb(130, 235, 255);
-const SPEEDS: [f32; 5] = [0.5, 0.75, 1.0, 1.25, 1.5];
+const SPEEDS: [f32; 6] = [0.25, 0.5, 0.75, 1.0, 1.25, 1.5];
 /// How far past the strike line notes stay visible, as a fraction of the highway.
 const BEHIND: f32 = 0.12;
 
 enum State {
-    Loading(Receiver<Result<Song, String>>),
+    Loading(Receiver<Result<Loaded, String>>),
     Failed(String),
     Ready(Song),
+}
+
+/// Saving the path chart: in progress, or done (the path saved to, or an error).
+enum SaveStatus {
+    Saving(Receiver<Result<String, String>>),
+    Done(Result<String, String>),
+}
+
+/// The optimal score for one instrument + difficulty, worked out in the background.
+enum Optimal {
+    Working(Receiver<Option<Outcome>>),
+    Done(Option<Outcome>),
 }
 
 pub struct Preview {
@@ -43,6 +60,13 @@ pub struct Preview {
     speed: f32,
     /// Seconds of upcoming notes on the highway.
     window: f32,
+    chart: Option<(Arc<Parsed>, Option<i64>)>,
+    optimal: HashMap<(u8, u8), Optimal>,
+    /// Showing the path chart instead of the highway, and the charts built so far.
+    path_view: bool,
+    path_charts: HashMap<(u8, u8), Option<pathchart::Layout>>,
+    save_status: Option<SaveStatus>,
+    titles: (String, String, String),
 }
 
 impl Preview {
@@ -66,6 +90,48 @@ impl Preview {
             last_frame: None,
             speed: 1.0,
             window: 1.6,
+            chart: None,
+            optimal: HashMap::new(),
+            path_view: false,
+            path_charts: HashMap::new(),
+            save_status: None,
+            titles: (
+                c.name.clone().unwrap_or_else(|| t("Unknown")),
+                c.artist.clone().unwrap_or_else(|| t("Unknown Artist")),
+                c.charter.clone().unwrap_or_else(|| t("Unknown Charter")),
+            ),
+        }
+    }
+
+    /// The optimal score for the shown track: starts working it out if needed, and returns it
+    /// once ready (None while working; Some(None) if there isn't one).
+    fn optimal(&mut self, ctx: &egui::Context) -> Option<Option<&Outcome>> {
+        let key = (self.inst, self.diff);
+        if !self.optimal.contains_key(&key) {
+            let (chart, cutoff) = self.chart.clone()?;
+            let (tx, rx) = channel();
+            let ctx = ctx.clone();
+            thread::spawn(move || {
+                let _ = tx.send(optimal::optimise(
+                    &chart,
+                    key.0,
+                    key.1,
+                    cutoff,
+                    optimal::Options::default(),
+                ));
+                ctx.request_repaint();
+            });
+            self.optimal.insert(key, Optimal::Working(rx));
+        }
+        let entry = self.optimal.get_mut(&key)?;
+        if let Optimal::Working(rx) = entry
+            && let Ok(result) = rx.try_recv()
+        {
+            *entry = Optimal::Done(result);
+        }
+        match entry {
+            Optimal::Done(result) => Some(result.as_ref()),
+            Optimal::Working(_) => None,
         }
     }
 
@@ -75,7 +141,12 @@ impl Preview {
             && let Ok(result) = rx.try_recv()
         {
             self.state = match result {
-                Ok(song) => {
+                Ok(Loaded {
+                    song,
+                    chart,
+                    sustain_cutoff,
+                }) => {
+                    self.chart = Some((chart, sustain_cutoff));
                     self.pick_track(&song);
                     let first = song.track(self.inst, self.diff).and_then(|t| t.notes.first()).map_or(0.0, |n| n.t);
                     self.time = (first - 2.0).max(-1.0);
@@ -92,8 +163,11 @@ impl Preview {
             // Above the blurred backdrop, which sits at the normal window level.
             .order(egui::Order::Foreground)
             .open(&mut open)
-            .default_size([360.0, 680.0f32.min(screen.height() - 60.0)])
-            .default_width(360.0);
+            .default_size([
+                560.0f32.min(screen.width() - 40.0),
+                680.0f32.min(screen.height() - 60.0),
+            ])
+            .default_width(560.0f32.min(screen.width() - 40.0));
         // Pinned to the middle of the whole window (not just the space between panels), so it
         // stays centred as it grows once the chart has loaded.
         let window = window.pivot(egui::Align2::CENTER_CENTER).fixed_pos(screen.center());
@@ -152,8 +226,12 @@ impl Preview {
             self.toggle(song.end);
         }
 
-        // Instrument and difficulty pickers: only what this chart has.
-        ui.horizontal(|ui| {
+        // Top: instrument and difficulty pickers (only what this chart has) and the optimal score,
+        // centred on a background.
+        let mut activations: Vec<(f32, f32)> = Vec::new();
+        section(ui).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        centered_row(ui, "pickers", |ui| {
             let mut insts: Vec<u8> = song.tracks.iter().map(|t| t.inst).collect();
             insts.dedup();
             egui::ComboBox::from_id_salt("preview_inst").selected_text(t(INSTRUMENTS[self.inst as usize].1)).show_ui(ui, |ui| {
@@ -174,10 +252,65 @@ impl Preview {
                 let gems = t.notes.iter().filter(|n| !matches!(n.kind, Kind::DoubleKick)).count();
                 ui.weak(crate::tr!("{count} notes", count = gems));
             }
+            ui.separator();
+            ui.selectable_value(&mut self.path_view, false, t("🎸 Highway"));
+            ui.selectable_value(&mut self.path_view, true, t("📈 Path chart"))
+                .on_hover_text(t("The whole song with the star power path, like a CHOpt image"));
         });
-        ui.add_space(4.0);
 
-        let size = vec2(ui.available_width(), (ui.available_height() - 44.0).max(200.0));
+        // The best possible score, and where to activate star power for it (blue on the highway).
+        centered_row(ui, "optimal", |ui| {
+            let drums = self.inst == crate::api::DRUMS;
+            match self.optimal(ui.ctx()) {
+                None => {
+                    ui.spinner();
+                    ui.weak(t("Working out the optimal score…"));
+                }
+                Some(None) => {}
+                Some(Some(o)) => {
+                    activations = o.activations.iter().map(|a| (a.first_secs as f32, a.last_secs as f32)).collect();
+                    let tip = crate::tr!(
+                        "Every note hit, with star power activated where the blue sections show (squeezing and whammy included), as CHOpt works it out. Without star power: {score}",
+                        score = thousands(o.no_sp)
+                    );
+                    ui.label(RichText::new(crate::tr!("⭐ Optimal score: {score}", score = thousands(o.total))).strong().color(STAR))
+                        .on_hover_text(tip);
+                    let steps: Vec<String> = o
+                        .activations
+                        .iter()
+                        .enumerate()
+                        .map(|(k, a)| {
+                            crate::tr!(
+                                "{n}. After {phrases} phrase(s), activate in measure {from}; it lasts to measure {to} (+{points})",
+                                n = k + 1,
+                                phrases = a.phrases_before,
+                                from = a.first_measure.floor(),
+                                to = a.last_measure.floor(),
+                                points = thousands(a.bonus)
+                            ) + &if a.phrases_during > 0 { crate::tr!(", collecting {count} more on the way", count = a.phrases_during) } else { String::new() }
+                        })
+                        .collect();
+                    let about = if drums {
+                        t("How many fills to let go by before each activation (0: the first fill that shows up). E: hit the note that fills the bar early so the fill shows up; L: hit it late so it doesn't.")
+                    } else {
+                        t("Phrases collected before each activation; (+n) are collected during it.")
+                    };
+                    let tip = format!("{about}\n\n{}", steps.join("\n"));
+                    ui.weak(crate::tr!("Path {path}", path = o.path)).on_hover_text(tip);
+                }
+            }
+        });
+        });
+        ui.add_space(6.0);
+        if self.path_view {
+            self.path_chart(ui);
+            return;
+        }
+
+        let size = vec2(
+            ui.available_width(),
+            (ui.available_height() - 62.0).max(200.0),
+        );
         let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
         if resp.clicked() {
             self.toggle(song.end);
@@ -190,35 +323,160 @@ impl Preview {
             }
         }
         if let Some(track) = song.track(self.inst, self.diff) {
-            draw(ui.painter_at(rect), rect, song, track, self.time, self.window);
+            draw(
+                ui.painter_at(rect),
+                rect,
+                song,
+                track,
+                &activations,
+                self.time,
+                self.window,
+            );
         }
 
         ui.add_space(6.0);
-        ui.horizontal(|ui| {
-            let icon = if self.playing { "⏸" } else { "▶" };
-            if ui.add(egui::Button::new(RichText::new(icon).size(16.0)).min_size(vec2(36.0, 28.0))).on_hover_text(t("Play/pause (Space)")).clicked() {
-                self.toggle(song.end);
+        // Bottom: playback controls on a background.
+        section(ui).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                let icon = if self.playing { "⏸" } else { "▶" };
+                if ui
+                    .add(
+                        egui::Button::new(RichText::new(icon).size(16.0))
+                            .min_size(vec2(36.0, 28.0)),
+                    )
+                    .on_hover_text(t("Play/pause (Space)"))
+                    .clicked()
+                {
+                    self.toggle(song.end);
+                }
+                ui.label(
+                    RichText::new(format!("{} / {}", clock(self.time), clock(song.end)))
+                        .monospace(),
+                );
+                let right = 190.0;
+                ui.spacing_mut().slider_width = (ui.available_width() - right).max(60.0);
+                ui.add(egui::Slider::new(&mut self.time, -1.0..=song.end).show_value(false));
+                egui::ComboBox::from_id_salt("preview_speed")
+                    .selected_text(format!("{}×", self.speed))
+                    .width(64.0)
+                    .show_ui(ui, |ui| {
+                        for s in SPEEDS {
+                            ui.selectable_value(&mut self.speed, s, format!("{s}×"));
+                        }
+                    })
+                    .response
+                    .on_hover_text(t("Playback speed"));
+                ui.spacing_mut().slider_width = 70.0;
+                // Note speed: a shorter window makes notes move faster.
+                let mut note_speed = 3.2 / self.window;
+                if ui
+                    .add(egui::Slider::new(&mut note_speed, 1.0..=4.0).show_value(false))
+                    .on_hover_text(t("Note speed"))
+                    .changed()
+                {
+                    self.window = 3.2 / note_speed;
+                }
+            });
+        });
+    }
+
+    /// The path chart for the shown track, scaled to the window, with a button to save it.
+    fn path_chart(&mut self, ui: &mut egui::Ui) {
+        let key = (self.inst, self.diff);
+        let ready = match self.optimal.get(&key) {
+            Some(Optimal::Done(Some(o))) => Some(o),
+            Some(Optimal::Done(None)) => {
+                ui.weak(t("There's no path to show for this part"));
+                return;
             }
-            ui.label(RichText::new(format!("{} / {}", clock(self.time), clock(song.end))).monospace());
-            let right = 190.0;
-            ui.spacing_mut().slider_width = (ui.available_width() - right).max(60.0);
-            ui.add(egui::Slider::new(&mut self.time, -1.0..=song.end).show_value(false));
-            egui::ComboBox::from_id_salt("preview_speed")
-                .selected_text(format!("{}×", self.speed))
-                .width(64.0)
-                .show_ui(ui, |ui| {
-                    for s in SPEEDS {
-                        ui.selectable_value(&mut self.speed, s, format!("{s}×"));
+            _ => None,
+        };
+        let Some(outcome) = ready else {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.weak(t("Working out the optimal score…"));
+            });
+            return;
+        };
+        if !self.path_charts.contains_key(&key)
+            && let Some((chart, cutoff)) = &self.chart
+        {
+            let (name, artist, charter) = &self.titles;
+            let titles = pathchart::Titles {
+                name: name.clone(),
+                artist: artist.clone(),
+                charter: charter.clone(),
+                part: format!("{} {}", t(INSTRUMENTS[key.0 as usize].1), t(DIFFICULTIES[key.1 as usize].1)),
+            };
+            let layout = pathchart::build(chart, key.0, key.1, *cutoff, outcome, &titles);
+            self.path_charts.insert(key, layout);
+        }
+        let Some(Some(layout)) = self.path_charts.get(&key) else {
+            ui.weak(t("There's no path to show for this part"));
+            return;
+        };
+        let footer = 52.0;
+        egui::ScrollArea::vertical()
+            .id_salt("path_chart")
+            .max_height((ui.available_height() - footer).max(120.0))
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                let scale = ui.available_width() / pathchart::WIDTH;
+                let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), layout.height * scale), Sense::hover());
+                let painter = ui.painter_at(rect);
+                painter.rect_filled(rect, 0.0, Color32::WHITE);
+                layout.paint(&painter, rect.min, scale);
+            });
+        ui.add_space(6.0);
+        section(ui).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            centered_row(ui, "path_save", |ui| {
+                let mut chosen = None;
+                ui.menu_button(t("💾  Save as…"), |ui| {
+                    for format in pathchart::Format::ALL {
+                        if ui.button(format!("{}  (.{})", format.name(), format.extension())).clicked() {
+                            chosen = Some(format);
+                            ui.close();
+                        }
                     }
                 })
                 .response
-                .on_hover_text(t("Playback speed"));
-            ui.spacing_mut().slider_width = 70.0;
-            // Note speed: a shorter window makes notes move faster.
-            let mut note_speed = 3.2 / self.window;
-            if ui.add(egui::Slider::new(&mut note_speed, 1.0..=4.0).show_value(false)).on_hover_text(t("Note speed")).changed() {
-                self.window = 3.2 / note_speed;
-            }
+                .on_hover_text(t("Save the path chart as a picture"));
+                if let Some(format) = chosen {
+                    let (name, artist, _) = &self.titles;
+                    let file = crate::api::sanitize_filename(&format!("{artist} - {name} ({})", t(INSTRUMENTS[key.0 as usize].1)));
+                    let ext = format.extension();
+                    if let Some(path) = rfd::FileDialog::new().set_file_name(format!("{file}.{ext}")).add_filter(format.name(), &[ext]).save_file() {
+                        // Drawing a long chart into pixels takes a moment, so it's done in the background.
+                        let (tx, rx) = channel();
+                        let (layout, ctx) = (layout.clone(), ui.ctx().clone());
+                        thread::spawn(move || {
+                            let _ = tx.send(layout.save(&path, format).map(|()| path.display().to_string()).map_err(|e| format!("{e:#}")));
+                            ctx.request_repaint();
+                        });
+                        self.save_status = Some(SaveStatus::Saving(rx));
+                    }
+                }
+                if let Some(SaveStatus::Saving(rx)) = &self.save_status
+                    && let Ok(result) = rx.try_recv()
+                {
+                    self.save_status = Some(SaveStatus::Done(result));
+                }
+                match &self.save_status {
+                    Some(SaveStatus::Saving(_)) => {
+                        ui.spinner();
+                        ui.weak(t("Saving…"));
+                    }
+                    Some(SaveStatus::Done(Ok(path))) => {
+                        ui.weak(t("✔ Saved")).on_hover_text(path);
+                    }
+                    Some(SaveStatus::Done(Err(e))) => {
+                        ui.weak(tr!("Couldn't save: {error}", error = e));
+                    }
+                    None => {}
+                }
+            });
         });
     }
 
@@ -230,15 +488,40 @@ impl Preview {
     }
 }
 
-fn load(client: &Client, chart: &Chart) -> anyhow::Result<Song> {
+/// A downloaded chart: what the highway draws, plus the notes in ticks and song.ini's
+/// sustain cutoff for working out optimal scores.
+pub(crate) struct Loaded {
+    pub song: Song,
+    pub chart: Arc<Parsed>,
+    pub sustain_cutoff: Option<i64>,
+}
+
+pub(crate) fn load(client: &Client, chart: &Chart) -> anyhow::Result<Loaded> {
     let data = client.fetch_sng(chart)?;
     let (ini, file) = sng::read_file(&data, &["notes.chart", "notes.mid"])?;
     let pro = chart.drum_type == Some(1) || ini_flag(&ini, "pro_drums");
-    match file {
-        Some((name, bytes)) if name.ends_with(".mid") => chart::parse_midi(&bytes, pro),
-        Some((_, bytes)) => chart::parse_chart(&String::from_utf8_lossy(&bytes), pro),
+    let mut parsed = match file {
+        Some((name, bytes)) if name.ends_with(".mid") => chart::read_midi_chart(&bytes)?,
+        Some((_, bytes)) => chart::read_chart(&String::from_utf8_lossy(&bytes)),
         None => bail!("it has no notes.chart or notes.mid"),
-    }
+    };
+    let sustain_cutoff = ini_value(&ini, "sustain_cutoff_threshold").and_then(|v| v.parse().ok());
+    // Which kind of drum kit the chart is for changes how drums score.
+    let ini_bool = |key| ini_value(&ini, key).map(|v| matches!(v.to_lowercase().as_str(), "true" | "1"));
+    parsed.pro_drums = ini_bool("pro_drums");
+    parsed.five_lane_drums = ini_bool("five_lane_drums");
+    Ok(Loaded {
+        song: parsed.song(pro)?,
+        chart: Arc::new(parsed),
+        sustain_cutoff,
+    })
+}
+
+fn ini_value<'a>(ini: &'a str, key: &str) -> Option<&'a str> {
+    ini.lines()
+        .filter_map(|l| l.split_once('='))
+        .find(|(k, _)| k.trim().eq_ignore_ascii_case(key))
+        .map(|(_, v)| v.trim())
 }
 
 fn ini_flag(ini: &str, key: &str) -> bool {
@@ -261,8 +544,53 @@ fn lane_colors(layout: Layout) -> &'static [Color32] {
     }
 }
 
-/// Paints the highway and every note within view at song time `now`.
-fn draw(p: egui::Painter, rect: Rect, song: &Song, track: &Track, now: f32, window: f32) {
+/// A score with thousands separators, e.g. 1,091,597.
+/// The background behind the preview's top and bottom sections.
+fn section(ui: &egui::Ui) -> egui::Frame {
+    egui::Frame::new()
+        .fill(ui.visuals().extreme_bg_color)
+        .corner_radius(CornerRadius::same(8))
+        .inner_margin(egui::Margin::symmetric(10, 8))
+}
+
+/// A row of widgets centred horizontally. egui can't centre a row it hasn't measured, so this
+/// remembers the row's width from the previous frame.
+fn centered_row(ui: &mut egui::Ui, id: &str, add: impl FnOnce(&mut egui::Ui)) {
+    let id = ui.id().with(id);
+    let width: f32 = ui.ctx().data(|d| d.get_temp(id)).unwrap_or(0.0);
+    ui.horizontal(|ui| {
+        ui.add_space(((ui.available_width() - width) / 2.0).max(0.0));
+        let used = ui.horizontal(add).response.rect.width();
+        if (used - width).abs() > 0.5 {
+            ui.ctx().data_mut(|d| d.insert_temp(id, used));
+            ui.ctx().request_repaint();
+        }
+    });
+}
+
+pub(crate) fn thousands(n: u64) -> String {
+    let digits = n.to_string();
+    let mut out = String::new();
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// Paints the highway and every note within view at song time `now`, with star power
+/// activations (start, end seconds) shaded blue.
+fn draw(
+    p: egui::Painter,
+    rect: Rect,
+    song: &Song,
+    track: &Track,
+    activations: &[(f32, f32)],
+    now: f32,
+    window: f32,
+) {
     let layout = track.layout;
     let lanes = layout.lanes() as f32;
     let colors = lane_colors(layout);
@@ -281,8 +609,28 @@ fn draw(p: egui::Painter, rect: Rect, song: &Song, track: &Track, now: f32, wind
 
     // Highway surface, lane dividers and edges.
     let edge = 1.06;
-    let board = vec![at(-edge, 1.0), at(edge, 1.0), at(edge, -BEHIND), at(-edge, -BEHIND)];
-    p.add(egui::Shape::convex_polygon(board, Color32::from_rgb(20, 20, 30), Stroke::new(2.0, Color32::from_gray(90))));
+    let board = vec![
+        at(-edge, 1.0),
+        at(edge, 1.0),
+        at(edge, -BEHIND),
+        at(-edge, -BEHIND),
+    ];
+    p.add(egui::Shape::convex_polygon(
+        board,
+        Color32::from_rgb(20, 20, 30),
+        Stroke::new(2.0, Color32::from_gray(90)),
+    ));
+    for &(from, to) in activations {
+        let (z0, z1) = (z_of(from).max(-BEHIND), z_of(to).min(1.0));
+        if z1 > z0 {
+            let band = vec![at(-edge, z1), at(edge, z1), at(edge, z0), at(-edge, z0)];
+            p.add(egui::Shape::convex_polygon(
+                band,
+                Color32::from_rgba_unmultiplied(60, 110, 255, 60),
+                Stroke::NONE,
+            ));
+        }
+    }
     for i in 1..layout.lanes() {
         let x = -1.0 + 2.0 * i as f32 / lanes;
         p.line_segment([at(x, 1.0), at(x, -BEHIND)], Stroke::new(1.0, Color32::from_gray(45)));
@@ -411,7 +759,7 @@ mod tests {
         for c in picks {
             match load(&client, c) {
                 Err(e) => println!("FAILED {}: {e:#}", c.title()),
-                Ok(song) => {
+                Ok(Loaded { song, .. }) => {
                     println!("{}", c.title());
                     for s in &c.notes {
                         let Some(t) = song.track(s.i, s.d) else {

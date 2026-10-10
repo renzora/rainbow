@@ -32,6 +32,10 @@ A fast desktop app for searching and downloading Clone Hero / YARG charts from
   Clone Hero charts: `song.ini` from `songs.dta`, `notes.mid`, `album.png`, and the multitrack
   audio split into per-instrument Ogg Vorbis stems. Encrypted official DLC can't be converted.
 - **Chart preview**: watch any chart's notes fall down a highway before downloading it.
+- **Clone Hero leaderboards**: a song's details show its top scores on the
+  [Clone Hero leaderboards](https://leaderboards.clonehero.net) for each instrument and difficulty.
+  Rainbow fetches just the chart's notes and works out the track hash the leaderboards use (a port
+  of [scan-chart](https://github.com/Geomitron/scan-chart)'s).
 - **Automatic .zip extraction** for charts downloaded from other sites.
 - **Accessibility**: a choice of fonts (including Atkinson Hyperlegible, Lexend and
   OpenDyslexic), colour-blind safe colours, a high-contrast theme, reduce motion, full
@@ -95,7 +99,7 @@ Encore is a free, donation-funded service. Rainbow uses the same API as Bridge, 
 keep bulk-download delays reasonable, and consider
 [supporting Encore on Patreon](https://www.patreon.com/cw/ChorusEncore701?l=en-GB).
 Questions about Encore itself? Join the [Encore Discord](https://discord.gg/cqaUXGm).
-Rainbow is not affiliated with Chorus Encore or Bridge.
+Rainbow is not affiliated with Chorus Encore, Bridge or Clone Hero.
 
 ## Credits
 

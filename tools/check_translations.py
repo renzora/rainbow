@@ -31,7 +31,8 @@ for path in sorted(Path("assets/lang").glob("*.json")):
         if sorted(placeholder.findall(key)) != sorted(placeholder.findall(value)):
             issues.append(f"placeholders differ in {key!r}: {value!r}")
         lead = icon.match(key)
-        if lead and not value.startswith(lead.group(1)):
+        # A leading comma may be the language's own (Chinese and Japanese use ， and 、).
+        if lead and not value.startswith(lead.group(1)) and not (lead.group(1).strip() == "," and value[:1] in "，、"):
             issues.append(f"leading icon changed in {key!r}: {value!r}")
         if chr(0x2014) in value:  # em dash
             issues.append(f"em dash in {key!r}")

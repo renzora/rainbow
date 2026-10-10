@@ -9,18 +9,26 @@ repository = "https://github.com/renzora/rainbow"
 [dependencies]
 anyhow = "1.0.104"
 arboard = { version = "3.6.1", default-features = false }
+blake3 = "1.8.7"
 dirs = "7.0.0"
 eframe = "0.36.2"
 egui_extras = { version = "0.36.2", features = ["datepicker", "svg"] }
-image = { version = "0.25.10", default-features = false, features = ["jpeg", "png"] }
+image = { version = "0.25.10", default-features = false, features = ["jpeg", "png", "webp"] }
 jiff = "0.2.38"
+resvg = { version = "0.45.1", default-features = false, features = ["text"] }
 reqwest = { version = "0.13.5", default-features = false, features = ["blocking", "json", "rustls"] }
 rfd = "0.17.2"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
+sha2 = "0.11.0"
 sys-locale = "0.3.2"
 vorbis_rs = "0.5.6"
 zip = { version = "9.0.1", default-features = false, features = ["deflate"] }
+
+# Unpacking Linux release downloads (.tar.gz) for the updater.
+[target.'cfg(target_os = "linux")'.dependencies]
+flate2 = "1.1.10"
+tar = "0.4.46"
 
 [build-dependencies]
 winresource = "0.1.31"

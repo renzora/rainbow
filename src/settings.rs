@@ -83,6 +83,8 @@ pub struct Settings {
     pub delete_zips: bool,
     /// Convert Rock Band CON packages that appear in the songs folder.
     pub auto_convert: bool,
+    /// Carry on with an unfinished download when Rainbow is reopened.
+    pub resume_downloads: bool,
     /// Interface language code ("auto" = follow the system).
     pub language: String,
     /// Interface font.
@@ -95,6 +97,11 @@ pub struct Settings {
     pub scroll_speed: f32,
     /// Cover size in the results table, in points (drag the cover column to change it).
     pub cover_size: f32,
+    /// Earlier search texts, newest first.
+    pub recent_searches: Vec<String>,
+    /// Look for a newer Rainbow on GitHub at startup, and install new versions automatically.
+    pub check_updates: bool,
+    pub auto_update: bool,
 }
 
 impl Default for Settings {
@@ -111,6 +118,9 @@ impl Default for Settings {
             delay_secs: 2.0,
             refresh_after_hours: Some(12),
             cover_size: 42.0,
+            recent_searches: Vec::new(),
+            check_updates: true,
+            auto_update: false,
             language: "auto".to_owned(),
             font: crate::theme::UiFont::default(),
             color_blind: crate::theme::ColorBlind::Off,
@@ -119,6 +129,7 @@ impl Default for Settings {
             auto_extract: false,
             delete_zips: false,
             auto_convert: true,
+            resume_downloads: true,
         }
     }
 }

@@ -33,17 +33,23 @@ impl<'a> Reader<'a> {
     }
 }
 
-/// The .sng's song.ini text and its files' masks and (name, offset, length).
-struct Contents {
+/// The .sng's song.ini text and values, and its files' masks and (name, offset, length).
+pub struct Contents {
     ini: String,
+    pub values: Vec<(String, String)>,
     mask: [u8; 16],
-    files: Vec<(String, usize, usize)>,
+    pub files: Vec<(String, usize, usize)>,
 }
 
 impl Contents {
     fn data(&self, data: &[u8], offset: usize, len: usize) -> Result<Vec<u8>> {
         let end = offset.checked_add(len).filter(|&e| e <= data.len()).context("truncated .sng file data")?;
-        Ok(data[offset..end].iter().enumerate().map(|(i, b)| b ^ (self.mask[i % 16] ^ (i % 256) as u8)).collect())
+        Ok(self.unmask(&data[offset..end]))
+    }
+
+    /// Decodes one whole file's bytes, as stored in the .sng.
+    pub fn unmask(&self, bytes: &[u8]) -> Vec<u8> {
+        bytes.iter().enumerate().map(|(i, b)| b ^ (self.mask[i % 16] ^ (i % 256) as u8)).collect()
     }
 }
 
@@ -72,7 +78,9 @@ pub fn extract(sng_path: &Path, out_dir: &Path) -> Result<()> {
     Ok(())
 }
 
-fn contents(data: &[u8]) -> Result<Contents> {
+/// Reads the header (metadata and file list), which is all at the start of the file, so
+/// `data` only needs to be that much of it.
+pub fn contents(data: &[u8]) -> Result<Contents> {
     let mut r = Reader { buf: data, pos: 0 };
     if r.take(6)? != b"SNGPKG" {
         bail!("not a .sng file");
@@ -82,12 +90,14 @@ fn contents(data: &[u8]) -> Result<Contents> {
 
     let _metadata_len = r.u64()?;
     let mut ini = String::from("[song]\n");
+    let mut values = Vec::new();
     for _ in 0..r.u64()? {
         let key_len = r.i32()?;
         let key = r.string(key_len)?;
         let value_len = r.i32()?;
         let value = r.string(value_len)?;
         ini.push_str(&format!("{key} = {value}\n"));
+        values.push((key, value));
     }
 
     let _file_meta_len = r.u64()?;
@@ -99,7 +109,7 @@ fn contents(data: &[u8]) -> Result<Contents> {
         let offset = r.u64()? as usize;
         files.push((name, offset, len));
     }
-    Ok(Contents { ini, mask, files })
+    Ok(Contents { ini, values, mask, files })
 }
 
 #[cfg(test)]

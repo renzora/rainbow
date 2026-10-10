@@ -120,10 +120,22 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v7
+      # The app's updater compares the tag with its own version, so they must agree.
+      - name: Check the tag matches Cargo.toml
+        run: |
+          VERSION=$(grep -m1 '^version' Cargo.toml | cut -d '"' -f2)
+          if [ "v$VERSION" != "$GITHUB_REF_NAME" ]; then
+            echo "Tag $GITHUB_REF_NAME doesn't match the Cargo.toml version ($VERSION)"
+            exit 1
+          fi
       - uses: actions/download-artifact@v8
         with:
           path: artifacts
           merge-multiple: true
+      # The updater checks downloads against these before installing them.
+      - name: Checksums
+        run: cd artifacts && sha256sum rainbow-* > SHA256SUMS
       - uses: softprops/action-gh-release@v3
         with:
           files: artifacts/*
