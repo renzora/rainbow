@@ -13,9 +13,38 @@ pub enum DownloadFormat {
     Folder,
 }
 
+/// Table row size.
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq)]
+pub enum Density {
+    Compact,
+    Default,
+    Large,
+}
+
+impl Density {
+    /// Cover size each preset starts from (the cover column can then be dragged).
+    pub fn cover_size(self) -> f32 {
+        match self {
+            Density::Compact => 24.0,
+            Density::Default => 42.0,
+            Density::Large => 72.0,
+        }
+    }
+
+    /// Row height when the cover column is hidden.
+    pub fn row_height(self) -> f32 {
+        match self {
+            Density::Compact => 26.0,
+            Density::Default => 34.0,
+            Density::Large => 46.0,
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, PartialEq)]
 #[serde(default)]
 pub struct Columns {
+    pub cover: bool,
     pub artist: bool,
     pub album: bool,
     pub genre: bool,
@@ -28,7 +57,7 @@ pub struct Columns {
 
 impl Default for Columns {
     fn default() -> Self {
-        Self { artist: true, album: true, genre: true, year: true, charter: true, length: true, difficulty: true, uploaded: false }
+        Self { cover: true, artist: true, album: true, genre: true, year: true, charter: true, length: true, difficulty: true, uploaded: false }
     }
 }
 
@@ -41,10 +70,15 @@ pub struct Settings {
     pub zoom: f32,
     pub format: DownloadFormat,
     pub video: bool,
-    pub compact: bool,
+    pub density: Density,
     pub columns: Columns,
     /// Seconds between downloads in bulk downloads.
     pub delay_secs: f32,
+    /// Check Encore for new charts at startup if the catalogue is older than this many hours
+    /// (0 = every launch, None = never; the Refresh button always works).
+    pub refresh_after_hours: Option<u32>,
+    /// Cover size in the results table, in points (drag the cover column to change it).
+    pub cover_size: f32,
 }
 
 impl Default for Settings {
@@ -56,9 +90,11 @@ impl Default for Settings {
             zoom: 1.0,
             format: DownloadFormat::Sng,
             video: false,
-            compact: false,
+            density: Density::Default,
             columns: Columns::default(),
             delay_secs: 2.0,
+            refresh_after_hours: Some(12),
+            cover_size: 42.0,
         }
     }
 }

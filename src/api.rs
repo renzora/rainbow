@@ -22,7 +22,7 @@ use crate::settings::{DownloadFormat, Settings};
 use crate::sng;
 
 const API_URL: &str = "https://api.enchor.us";
-const FILES_URL: &str = "https://files.enchor.us";
+pub const FILES_URL: &str = "https://files.enchor.us";
 const MANIFEST: &str = ".rainbow-downloaded.txt";
 pub const MAX_PER_PAGE: u32 = 250;
 
@@ -96,6 +96,14 @@ pub struct Chart {
     pub charter: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chart_hash: Option<String>,
+    /// md5 of the album art; the image is at files.enchor.us/<art>.jpg
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub art: Option<String>,
+    /// Source-game icon, e.g. "gh3" or "rb2dlc" for official charts (see games.rs).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pack: Option<String>,
     /// ISO 8601 time the chart was last modified in Google Drive.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub modified: Option<String>,
@@ -114,12 +122,34 @@ pub struct Chart {
 }
 
 fn text(v: &Value, key: &str) -> Option<String> {
-    match v.get(key)? {
-        Value::Null => None,
-        Value::String(s) if s.is_empty() => None,
-        Value::String(s) => Some(s.clone()),
-        other => Some(other.to_string()),
+    let s = match v.get(key)? {
+        Value::Null => return None,
+        Value::String(s) => strip_tags(s),
+        other => other.to_string(),
+    };
+    let s = s.trim();
+    (!s.is_empty()).then(|| s.to_owned())
+}
+
+/// Removes rich-text tags like `<color=#00ffff>S</color>` that charters put in names.
+pub fn strip_tags(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(start) = rest.find('<') {
+        match rest[start..].find('>') {
+            // Only strip things that look like tags, not e.g. "<3" in a song name.
+            Some(len) if rest[start + 1..start + len].chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '/') => {
+                out.push_str(&rest[..start]);
+                rest = &rest[start + len + 1..];
+            }
+            _ => {
+                out.push_str(&rest[..=start]);
+                rest = &rest[start + 1..];
+            }
+        }
     }
+    out.push_str(rest);
+    out
 }
 
 impl Chart {
@@ -193,6 +223,9 @@ impl Chart {
             year: text(v, "year"),
             charter: text(v, "charter"),
             chart_hash: text(v, "chartHash"),
+            art: text(v, "albumArtMd5"),
+            icon: text(v, "icon").map(|i| i.to_lowercase()),
+            pack: text(v, "packName"),
             modified: text(v, "modifiedTime"),
             length_ms: v.get("song_length").and_then(Value::as_u64).filter(|&l| l > 0),
             effective_ms: nd.get("effectiveLength").and_then(Value::as_f64),

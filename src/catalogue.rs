@@ -18,7 +18,7 @@ use crate::api::{Chart, Client, MAX_PER_PAGE};
 /// Save progress every this many pages while building, so it can resume if interrupted.
 const SAVE_EVERY_PAGES: u32 = 10;
 /// Bump when `Chart`'s cached fields change; older caches are rebuilt.
-const VERSION: u32 = 2;
+const VERSION: u32 = 4;
 
 #[derive(Serialize, Deserialize, Default, Clone)]
 pub struct Catalogue {
@@ -34,7 +34,9 @@ pub struct Catalogue {
 }
 
 pub enum Progress {
-    Page { page: u32, pages: u32, charts: usize },
+    /// A page was fetched; `new` holds the charts that weren't in the catalogue yet, so the
+    /// UI can make them searchable straight away.
+    Page { page: u32, pages: u32, charts: usize, new: Vec<Chart> },
 }
 
 pub fn data_dir() -> PathBuf {
@@ -91,7 +93,8 @@ impl Catalogue {
                 let resp = client.search("*", page, None, None)?;
                 let pages = resp.found.div_ceil(MAX_PER_PAGE as u64) as u32;
                 let fresh: Vec<Chart> = resp.charts.into_iter().filter(|c| known.insert(c.md5.clone())).collect();
-                progress(Progress::Page { page, pages, charts: before + new.len() + fresh.len() });
+                let charts = before + new.len() + fresh.len();
+                progress(Progress::Page { page, pages, charts, new: fresh.clone() });
                 if fresh.is_empty() || page >= pages {
                     new.extend(fresh);
                     break;
@@ -113,8 +116,9 @@ impl Catalogue {
                 let resp = client.search("*", page, None, None)?;
                 let pages = resp.found.div_ceil(MAX_PER_PAGE as u64) as u32;
                 let empty = resp.charts.is_empty();
-                self.charts.extend(resp.charts.into_iter().filter(|c| known.insert(c.md5.clone())));
-                progress(Progress::Page { page, pages, charts: self.charts.len() });
+                let fresh: Vec<Chart> = resp.charts.into_iter().filter(|c| known.insert(c.md5.clone())).collect();
+                self.charts.extend(fresh.iter().cloned());
+                progress(Progress::Page { page, pages, charts: self.charts.len(), new: fresh });
                 if empty || page >= pages {
                     break;
                 }

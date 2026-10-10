@@ -45,7 +45,8 @@ Settings and the catalogue live in `%LOCALAPPDATA%\rainbow`. Each songs folder g
 
 Encore is a free, donation-funded service. Rainbow uses the same API as Bridge, but please
 keep bulk-download delays reasonable, and consider
-[supporting Encore on Patreon](https://www.patreon.com/ChorusEncore701).
+[supporting Encore on Patreon](https://www.patreon.com/cw/ChorusEncore701?l=en-GB).
+Questions about Encore itself? Join the [Encore Discord](https://discord.gg/cqaUXGm).
 Rainbow is not affiliated with Chorus Encore or Bridge.
 
 ## License

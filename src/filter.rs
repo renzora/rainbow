@@ -2,9 +2,10 @@
 //! evaluated against the cached catalogue.
 
 use std::cmp::Ordering;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::api::{Chart, DRUMS, flag};
+use crate::games;
 
 /// Text fields in Bridge's "Search by" order.
 pub const TEXT_FIELDS: [&str; 6] = ["Name", "Artist", "Album", "Genre", "Year", "Charter"];
@@ -109,6 +110,10 @@ pub struct Filters {
     // Quick options.
     pub no_video: bool,
     pub no_broken: bool,
+    /// Only charts from the official Guitar Hero / Rock Band games.
+    pub legacy: bool,
+    /// Only charts from this game (a `games::game_key`).
+    pub game: Option<String>,
 
     pub sort: SortKey,
     pub descending: bool,
@@ -134,20 +139,43 @@ impl Filters {
 }
 
 /// Precomputed lowercase text for each chart, for fast matching.
+#[derive(Default)]
 pub struct Index {
     haystacks: Vec<String>,
     fields: Vec<[String; 6]>,
+    legacy: Vec<bool>,
+    game: Vec<Option<String>>,
+    game_counts: HashMap<String, usize>,
 }
 
 impl Index {
     pub fn new(charts: &[Chart]) -> Self {
+        let mut index = Self::default();
+        for c in charts {
+            index.push(c);
+        }
+        index
+    }
+
+    /// Adds the next chart (charts must be pushed in the same order as the chart list).
+    pub fn push(&mut self, c: &Chart) {
         let lower = |f: &Option<String>| f.as_deref().unwrap_or("").to_lowercase();
-        let fields: Vec<[String; 6]> = charts
-            .iter()
-            .map(|c| [lower(&c.name), lower(&c.artist), lower(&c.album), lower(&c.genre), lower(&c.year), lower(&c.charter)])
-            .collect();
-        let haystacks = fields.iter().map(|f| f.join(" \u{1}")).collect();
-        Self { haystacks, fields }
+        let fields = [lower(&c.name), lower(&c.artist), lower(&c.album), lower(&c.genre), lower(&c.year), lower(&c.charter)];
+        self.haystacks.push(fields.join(" \u{1}"));
+        self.fields.push(fields);
+        let game = games::game_key(c.icon.as_deref());
+        if let Some(g) = &game {
+            *self.game_counts.entry(g.clone()).or_default() += 1;
+        }
+        self.game.push(game);
+        self.legacy.push(games::is_legacy(c.icon.as_deref(), c.charter.as_deref()));
+    }
+
+    /// Official games present, with chart counts, in release order.
+    pub fn games(&self) -> Vec<(String, usize)> {
+        let mut games: Vec<(String, usize)> = self.game_counts.iter().map(|(g, n)| (g.clone(), *n)).collect();
+        games.sort_by_key(|(g, _)| games::game_order(g));
+        games
     }
 
     /// Indices of matching charts, sorted as requested.
@@ -180,6 +208,9 @@ impl Index {
                     return false;
                 }
                 if f.no_video && c.has(flag::VIDEO) || f.no_broken && c.has(flag::BROKEN) {
+                    return false;
+                }
+                if f.legacy && !self.legacy[i] || f.game.is_some() && self.game[i] != f.game {
                     return false;
                 }
                 // Instrument / difficulty: the chart must have notes for them.

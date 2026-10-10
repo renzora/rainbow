@@ -1751,6 +1751,8 @@ dependencies = [
  "num-traits",
  "png",
  "tiff",
+ "zune-core",
+ "zune-jpeg",
 ]
 
 [[package]]
@@ -2919,6 +2921,7 @@ dependencies = [
  "anyhow",
  "eframe",
  "egui_extras",
+ "image",
  "reqwest",
  "rfd",
  "serde",
