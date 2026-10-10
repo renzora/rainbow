@@ -495,10 +495,11 @@ pub fn filter_chip(ui: &mut egui::Ui, text: &str, color: Color32, close_tip: &st
     let font = FontId::proportional(11.5);
     let label = ui.painter().layout_no_wrap(text.to_owned(), font.clone(), color);
     let pad = egui::vec2(8.0, 3.0);
-    let (close_w, gap) = (16.0, 4.0);
-    let size = egui::vec2(pad.x + label.size().x + gap + close_w + pad.x * 0.5, label.size().y + pad.y * 2.0);
+    // Close area is a little wider than the ✖, plus right padding to balance the left.
+    let (close_w, gap, right_pad) = (18.0, 3.0, 5.0);
+    let size = egui::vec2(pad.x + label.size().x + gap + close_w + right_pad, label.size().y + pad.y * 2.0);
     let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::hover());
-    let close_rect = egui::Rect::from_min_max(egui::pos2(rect.right() - pad.x * 0.5 - close_w, rect.top()), rect.right_bottom());
+    let close_rect = egui::Rect::from_min_size(egui::pos2(rect.right() - right_pad - close_w, rect.top()), egui::vec2(close_w, rect.height()));
     let close = ui.interact(close_rect, resp.id.with("close"), egui::Sense::click());
     close.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, close_tip));
     let close_color = if close.hovered() { bad() } else { color };
@@ -506,7 +507,7 @@ pub fn filter_chip(ui: &mut egui::Ui, text: &str, color: Color32, close_tip: &st
     let painter = ui.painter();
     painter.rect(rect, CornerRadius::same(10), color.linear_multiply(0.18), Stroke::new(1.0, color.linear_multiply(0.6)), egui::StrokeKind::Inside);
     if close.hovered() {
-        painter.rect_filled(close_rect.shrink2(egui::vec2(1.0, 3.0)), CornerRadius::same(6), bad().linear_multiply(0.18));
+        painter.rect_filled(close_rect.shrink2(egui::vec2(1.0, 2.0)), CornerRadius::same(6), bad().linear_multiply(0.18));
     }
     painter.galley(rect.min + pad, label, color);
     painter.galley(close_rect.center() - x.size() / 2.0, x, close_color);
