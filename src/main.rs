@@ -1860,7 +1860,7 @@ impl App {
             ui.add_space(10.0);
             // Download and Preview side by side, half the panel each.
             let (mut download, mut open_preview) = (false, false);
-            let half = ((ui.available_width() - 12.0 - ui.spacing().item_spacing.x) / 2.0).max(60.0);
+            let half = ((ui.available_width() - ui.spacing().item_spacing.x) / 2.0).max(60.0);
             let busy = self.job.is_some();
             ui.horizontal(|ui| {
                 if downloaded {
@@ -1883,32 +1883,44 @@ impl App {
 
             ui.add_space(12.0);
             ui.label(RichText::new("Instruments").strong());
-            egui::Grid::new("detail_diffs").num_columns(3).striped(true).min_row_height(26.0).spacing([10.0, 4.0]).show(ui, |ui| {
-                for (k, (_, name, _)) in INSTRUMENTS.iter().enumerate() {
-                    let d = c.diffs[k];
-                    let notes = c.notes.iter().filter(|s| s.i == k as u8).min_by_key(|s| s.d); // hardest first
-                    if d < 0 && notes.is_none() {
-                        continue;
-                    }
-                    if link_ex(ui, RichText::new(format!("{}  {name}", instrument_icon(k as u8))), "Show charts for this instrument", false) {
-                        nav = Some(Nav::Instrument(k as u8));
-                    }
-                    if d >= 0 {
-                        let resp = ui.add(egui::Label::new(theme::difficulty_dots(d)).sense(Sense::click()));
-                        if resp.on_hover_text(format!("Intensity {d}: show {name} charts at this intensity")).clicked() {
-                            nav = Some(Nav::Difficulty(k as u8, d));
-                        }
-                    } else {
-                        ui.label("");
-                    }
-                    match notes {
-                        Some(s) => ui.weak(format!("{} notes · {:.0} max NPS", s.n, s.nps)),
-                        None => ui.label(""),
-                    };
-                    ui.end_row();
+            // One full-width band per instrument, alternating shades. Two lines, so the note
+            // count and NPS never get cut off however narrow the panel is.
+            let mut row = 0;
+            ui.spacing_mut().item_spacing.y = 2.0;
+            for (k, (_, name, _)) in INSTRUMENTS.iter().enumerate() {
+                let d = c.diffs[k];
+                let notes = c.notes.iter().filter(|s| s.i == k as u8).min_by_key(|s| s.d); // hardest first
+                if d < 0 && notes.is_none() {
+                    continue;
                 }
-            });
+                let fill = if row % 2 == 0 { ui.visuals().widgets.inactive.bg_fill } else { Color32::TRANSPARENT };
+                row += 1;
+                egui::Frame::new()
+                    .fill(fill)
+                    .corner_radius(CornerRadius::same(6))
+                    .inner_margin(egui::Margin::symmetric(10, 6))
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.horizontal(|ui| {
+                            if link_ex(ui, RichText::new(format!("{}  {name}", instrument_icon(k as u8))).strong(), "Show charts for this instrument", false) {
+                                nav = Some(Nav::Instrument(k as u8));
+                            }
+                            if d >= 0 {
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    let resp = ui.add(egui::Label::new(theme::difficulty_dots(d)).sense(Sense::click()));
+                                    if resp.on_hover_text(format!("Intensity {d}: show {name} charts at this intensity")).clicked() {
+                                        nav = Some(Nav::Difficulty(k as u8, d));
+                                    }
+                                });
+                            }
+                        });
+                        if let Some(s) = notes {
+                            ui.label(RichText::new(format!("{} notes  ·  {:.0} max NPS", s.n, s.nps)).size(12.5).weak());
+                        }
+                    });
+            }
 
+            ui.spacing_mut().item_spacing.y = 6.0;
             ui.add_space(10.0);
             ui.label(RichText::new("Features").strong());
             ui.horizontal_wrapped(|ui| {
@@ -2608,7 +2620,7 @@ impl eframe::App for App {
                     w.active.fg_stroke = w.active.bg_stroke;
                     w.active.fg_stroke.width = 4.0;
                     ui.style_mut().interaction.resize_grab_radius_side = 7.0;
-                    egui::Panel::right("detail").resizable(true).default_size(340.0).show(ui, |ui| {
+                    egui::Panel::right("detail").resizable(true).default_size(340.0).size_range(260.0..=640.0).show(ui, |ui| {
                         ui.set_style(normal.clone());
                         self.detail_panel(ui);
                     });
