@@ -1495,6 +1495,14 @@ impl App {
                 f.track_md5s = None;
             })));
         }
+        // Back only makes sense while it leads somewhere different: once every filter is gone
+        // (the full list again), there's nothing to go back to.
+        if chips.is_empty() && self.filters.query.trim().is_empty() {
+            self.history.clear();
+        }
+        while self.history.last() == Some(&self.filters) {
+            self.history.pop();
+        }
         if chips.is_empty() && self.history.is_empty() {
             return;
         }
@@ -2002,10 +2010,10 @@ impl App {
                     nav = Some(Nav::Text(5, ch.clone(), false));
                 }
                 if !c.length_text().is_empty() {
-                    theme::chip(ui, &format!("⏱ {}", c.length_text()), theme::RAINBOW[6]);
+                    theme::tag(ui, &format!("⏱ {}", c.length_text()), theme::RAINBOW[6]);
                 }
                 if !c.uploaded().is_empty() {
-                    theme::chip(ui, &format!("📅 {}", c.uploaded()), Color32::GRAY);
+                    theme::tag(ui, &format!("📅 {}", c.uploaded()), Color32::GRAY);
                 }
             });
 
@@ -2861,7 +2869,8 @@ fn feature_tags(ui: &mut egui::Ui, c: &Chart, full: bool, nav: &mut Option<Nav>)
         let label = t(label);
         let tip = tr!("{feature}: show charts with this", feature = label);
         let clicked = if full {
-            let resp = theme::chip(ui, &format!("{icon} {label}"), color);
+            let text = format!("{icon} {label}");
+            let resp = if clickable { theme::chip(ui, &text, color) } else { theme::tag(ui, &text, color) };
             if clickable { resp.on_hover_text(&tip).clicked() } else { false }
         } else if !matches!(bit, flag::ISSUES | flag::BROKEN | flag::FORCED | flag::OPEN | flag::TAP) {
             tag_icon(ui, RichText::new(icon).color(color), &label);

@@ -462,15 +462,26 @@ pub fn title(size: f32) -> egui::text::LayoutJob {
 
 /// A small rounded tag, e.g. for genres and chart features.
 pub fn chip(ui: &mut egui::Ui, text: &str, color: Color32) -> egui::Response {
+    chip_ex(ui, text, color, true).on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// A tag that only shows information (no click, normal cursor).
+pub fn tag(ui: &mut egui::Ui, text: &str, color: Color32) -> egui::Response {
+    chip_ex(ui, text, color, false)
+}
+
+fn chip_ex(ui: &mut egui::Ui, text: &str, color: Color32, clickable: bool) -> egui::Response {
     let galley = ui.painter().layout_no_wrap(text.to_owned(), FontId::proportional(11.5), color);
     let pad = egui::vec2(8.0, 3.0);
-    let (rect, resp) = ui.allocate_exact_size(galley.size() + pad * 2.0, egui::Sense::click());
+    let sense = if clickable { egui::Sense::click() } else { egui::Sense::hover() };
+    let (rect, resp) = ui.allocate_exact_size(galley.size() + pad * 2.0, sense);
+    let hovered = clickable && resp.hovered();
     resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, text));
     let painter = ui.painter();
     painter.rect(
         rect,
         CornerRadius::same(10),
-        color.linear_multiply(if resp.hovered() { 0.35 } else { 0.18 }),
+        color.linear_multiply(if hovered { 0.35 } else { 0.18 }),
         Stroke::new(1.0, color.linear_multiply(0.6)),
         egui::StrokeKind::Inside,
     );
