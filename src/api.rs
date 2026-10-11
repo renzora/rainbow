@@ -5,21 +5,19 @@
 //!   GET  https://files.enchor.us/<md5>_novideo.sng
 
 use std::collections::HashSet;
-use std::fs::{self, File, OpenOptions};
-use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::thread::sleep;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use web_time::Duration;
 
 use anyhow::Result;
-use reqwest::StatusCode;
-use reqwest::blocking::Response;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use web_time::{SystemTime, UNIX_EPOCH};
 
+use crate::net::{Http, Resp, StatusCode};
 use crate::settings::{DownloadFormat, Settings};
-use crate::sng;
+use crate::task::sleep;
+use crate::{sng, store};
 
 const API_URL: &str = "https://api.enchor.us";
 pub const FILES_URL: &str = "https://files.enchor.us";
@@ -301,8 +299,8 @@ impl std::fmt::Display for RateLimited {
 impl std::error::Error for RateLimited {}
 
 /// How long the server wants us to wait, from `Retry-After` or `X-Ratelimit-Reset` (a Unix time).
-fn rate_limit_wait(resp: &Response) -> Duration {
-    let header = |name| resp.headers().get(name)?.to_str().ok()?.parse::<u64>().ok();
+fn rate_limit_wait(resp: &Resp) -> Duration {
+    let header = |name| resp.header(name)?.parse::<u64>().ok();
     let secs = header("retry-after").or_else(|| {
         let now = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs();
         Some(header("x-ratelimit-reset")?.saturating_sub(now))
@@ -315,17 +313,13 @@ pub type StatusFn = Arc<dyn Fn(String) + Send + Sync>;
 
 #[derive(Clone)]
 pub struct Client {
-    http: reqwest::blocking::Client,
+    http: Http,
     status: Option<StatusFn>,
 }
 
 impl Client {
     pub fn new() -> Result<Self> {
-        let http = reqwest::blocking::Client::builder()
-            .user_agent(concat!("rainbow/", env!("CARGO_PKG_VERSION")))
-            .connect_timeout(Duration::from_secs(30))
-            .build()?;
-        Ok(Self { http, status: None })
+        Ok(Self { http: Http::new(None), status: None })
     }
 
     /// A copy of this client that reports rate-limit waits to `f`.
@@ -335,17 +329,16 @@ impl Client {
 
     /// Turns 429s into `RateLimited`, other bad statuses into errors, and pauses when
     /// the API says we've used up the current rate-limit window.
-    fn check(&self, resp: Response) -> Result<Response> {
+    async fn check(&self, resp: Resp) -> Result<Resp> {
         if resp.status() == StatusCode::TOO_MANY_REQUESTS {
             return Err(RateLimited(rate_limit_wait(&resp)).into());
         }
         let resp = resp.error_for_status()?;
-        let remaining =
-            resp.headers().get("x-ratelimit-remaining").and_then(|v| v.to_str().ok()?.parse::<u64>().ok());
+        let remaining = resp.header("x-ratelimit-remaining").and_then(|v| v.parse::<u64>().ok());
         if remaining == Some(0) {
             let wait = rate_limit_wait(&resp);
             self.report(format!("Used up Encore's rate limit, pausing {}s", wait.as_secs()));
-            sleep(wait);
+            sleep(wait).await;
         }
         Ok(resp)
     }
@@ -356,19 +349,19 @@ impl Client {
         }
     }
 
-    fn retry<T>(&self, mut f: impl FnMut() -> Result<T>) -> Result<T> {
+    async fn retry<T>(&self, mut f: impl AsyncFnMut() -> Result<T>) -> Result<T> {
         let mut wait = Duration::from_secs(2);
         let mut failures = 0;
         let mut rate_limits = 0;
         loop {
-            match f() {
+            match f().await {
                 Ok(v) => return Ok(v),
                 // Rate limits don't count as failures; just wait them out (within reason).
                 Err(e) if rate_limits < 30 && e.downcast_ref::<RateLimited>().is_some() => {
                     let d = e.downcast_ref::<RateLimited>().unwrap().0;
                     rate_limits += 1;
                     self.report(format!("Rate limited by Encore, waiting {}s", d.as_secs()));
-                    sleep(d);
+                    sleep(d).await;
                 }
                 // 4xx other than 429 means the request itself is wrong; retrying won't help.
                 Err(e) if e.downcast_ref::<reqwest::Error>().and_then(|e| e.status()).is_some_and(|s| s.is_client_error()) => {
@@ -377,7 +370,7 @@ impl Client {
                 Err(e) if failures < 4 => {
                     failures += 1;
                     self.report(format!("Request failed ({e:#}), retrying in {}s", wait.as_secs()));
-                    sleep(wait);
+                    sleep(wait).await;
                     wait *= 2;
                 }
                 Err(e) => return Err(e),
@@ -385,17 +378,17 @@ impl Client {
         }
     }
 
-    fn post_search(&self, endpoint: &str, body: &Value) -> Result<SearchPage> {
-        self.retry(|| {
-            let resp = self.check(
-                self.http.post(format!("{API_URL}{endpoint}")).json(body).timeout(Duration::from_secs(60)).send()?,
-            )?;
-            let raw: RawPage = resp.json()?;
+    async fn post_search(&self, endpoint: &str, body: &Value) -> Result<SearchPage> {
+        self.retry(async || {
+            let url = format!("{API_URL}{endpoint}");
+            let resp = self.check(self.http.post(&url).json(body).timeout(Duration::from_secs(60)).send().await?).await?;
+            let raw: RawPage = resp.json().await?;
             Ok(SearchPage { found: raw.found, charts: raw.data.iter().filter_map(Chart::from_api).collect() })
         })
+        .await
     }
 
-    pub fn search(&self, query: &str, page: u32, instrument: Option<u8>, difficulty: Option<u8>) -> Result<SearchPage> {
+    pub async fn search(&self, query: &str, page: u32, instrument: Option<u8>, difficulty: Option<u8>) -> Result<SearchPage> {
         let body = json!({
             "search": query,
             "per_page": MAX_PER_PAGE,
@@ -407,23 +400,23 @@ impl Client {
             "sort": null,
             "source": "bridge",
         });
-        self.post_search("/search", &body)
+        self.post_search("/search", &body).await
     }
 
     /// Charts with this md5 or chart hash, straight from Encore (for ones newer than the catalogue).
-    pub fn find_by_hash(&self, hash: &str) -> Result<Vec<Chart>> {
+    pub async fn find_by_hash(&self, hash: &str) -> Result<Vec<Chart>> {
         let body =
             json!({ "hash": hash, "per_page": MAX_PER_PAGE, "page": 1, "drumsReviewed": false });
-        Ok(self.post_search("/search/advanced", &body)?.charts)
+        Ok(self.post_search("/search/advanced", &body).await?.charts)
     }
 
     /// md5s of every chart with one of these track hashes (comma separated).
     /// Track hashes aren't in the local catalogue, so this asks the server.
-    pub fn md5s_for_track_hash(&self, track_hash: &str) -> Result<HashSet<String>> {
+    pub async fn md5s_for_track_hash(&self, track_hash: &str) -> Result<HashSet<String>> {
         let mut md5s = HashSet::new();
         for page in 1..=20 {
             let body = json!({ "trackHash": track_hash, "per_page": MAX_PER_PAGE, "page": page, "drumsReviewed": false });
-            let resp = self.post_search("/search/advanced", &body)?;
+            let resp = self.post_search("/search/advanced", &body).await?;
             let done = resp.charts.len() < MAX_PER_PAGE as usize;
             md5s.extend(resp.charts.into_iter().map(|c| c.md5));
             if done {
@@ -437,13 +430,13 @@ impl Client {
     /// Only the .sng's header and notes are downloaded (with range requests, not the audio),
     /// and they're kept on disk so the chart opens straight away next time. `progress` goes
     /// from 0 to 1000 as it downloads.
-    pub fn fetch_notes(&self, chart: &Chart, progress: &std::sync::atomic::AtomicU32) -> Result<(String, String, Vec<u8>)> {
+    pub async fn fetch_notes(&self, chart: &Chart, progress: &std::sync::atomic::AtomicU32) -> Result<(String, String, Vec<u8>)> {
         use std::sync::atomic::Ordering::Relaxed;
         let dir = crate::catalogue::cache_dir().join("charts");
         let ini_path = dir.join(format!("{}.ini", chart.md5));
         for name in ["notes.chart", "notes.mid"] {
             let path = dir.join(format!("{}.{}", chart.md5, name.trim_start_matches("notes.")));
-            if let (Ok(ini), Ok(bytes)) = (fs::read_to_string(&ini_path), fs::read(&path)) {
+            if let (Some(ini), Some(bytes)) = (store::read_string(&ini_path), store::read(&path)) {
                 progress.store(1000, Relaxed);
                 return Ok((ini, name.to_owned(), bytes));
             }
@@ -451,19 +444,15 @@ impl Client {
         let novideo = if chart.has(flag::VIDEO) { "_novideo" } else { "" };
         let url = format!("{FILES_URL}/{}{novideo}.sng", chart.md5);
         // A byte range of the file, reporting progress from `from` to `to` (per mille).
-        let fetch = |start: u64, len: u64, from: u32, to: u32| -> Result<Vec<u8>> {
-            self.retry(|| {
-                let resp = self.http.get(&url).header(reqwest::header::RANGE, format!("bytes={start}-{}", start + len.max(1) - 1)).send()?;
+        let fetch = async |start: u64, len: u64, from: u32, to: u32| -> Result<Vec<u8>> {
+            self.retry(async || {
+                let range = format!("bytes={start}-{}", start + len.max(1) - 1);
+                let resp = self.http.get(&url).header("range", &range).send().await?;
                 let partial = resp.status() == StatusCode::PARTIAL_CONTENT;
-                let mut resp = self.check(resp)?;
+                let mut resp = self.check(resp).await?;
                 let mut out = Vec::with_capacity(len as usize);
-                let mut buf = [0u8; 64 * 1024];
-                loop {
-                    let n = resp.read(&mut buf)?;
-                    if n == 0 {
-                        break;
-                    }
-                    out.extend_from_slice(&buf[..n]);
+                while let Some(piece) = resp.chunk().await? {
+                    out.extend_from_slice(&piece);
                     progress.store(from + ((to - from) as u64 * (out.len() as u64).min(len) / len.max(1)) as u32, Relaxed);
                     // A server that ignores the range sends the whole file; stop once we have ours.
                     if !partial && out.len() as u64 >= start + len {
@@ -472,11 +461,12 @@ impl Client {
                 }
                 Ok(if partial { out } else { out.get(start as usize..).unwrap_or_default().iter().take(len as usize).copied().collect() })
             })
+            .await
         };
-        let head = fetch(0, 64 * 1024, 0, 100)?;
+        let head = fetch(0, 64 * 1024, 0, 100).await?;
         let contents = match sng::contents(&head) {
             Ok(c) => c,
-            Err(_) => sng::contents(&fetch(0, 8 * 1024 * 1024, 0, 100)?)?,
+            Err(_) => sng::contents(&fetch(0, 8 * 1024 * 1024, 0, 100).await?)?,
         };
         let Some((name, offset, len)) = ["notes.chart", "notes.mid"]
             .iter()
@@ -484,23 +474,25 @@ impl Client {
         else {
             anyhow::bail!("it has no notes.chart or notes.mid");
         };
-        let bytes = contents.unmask(&fetch(*offset as u64, *len as u64, 100, 1000)?);
+        let bytes = contents.unmask(&fetch(*offset as u64, *len as u64, 100, 1000).await?);
         if bytes.len() != *len {
             anyhow::bail!("couldn't download the notes");
         }
         let name = name.to_lowercase();
         let ini = contents.ini().to_owned();
-        if fs::create_dir_all(&dir).is_ok() {
-            let _ = fs::write(dir.join(format!("{}.{}", chart.md5, name.trim_start_matches("notes."))), &bytes);
-            let _ = fs::write(&ini_path, &ini);
-        }
+        let _ = store::write(&dir.join(format!("{}.{}", chart.md5, name.trim_start_matches("notes."))), &bytes);
+        let _ = store::write(&ini_path, ini.as_bytes());
         Ok((ini, name, bytes))
     }
 
     /// Downloads a chart into `settings.dir` (as a .sng file or an extracted chart folder,
     /// named by `settings.folder_name`) and returns the path.
     /// `progress` is called with (bytes so far, total bytes if known).
-    pub fn download(&self, chart: &Chart, settings: &Settings, mut progress: impl FnMut(u64, Option<u64>)) -> Result<PathBuf> {
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn download(&self, chart: &Chart, settings: &Settings, mut progress: impl FnMut(u64, Option<u64>)) -> Result<PathBuf> {
+        use std::fs::{self, File};
+        use std::io::Write;
+
         let novideo = chart.has(flag::VIDEO) && !settings.video;
         let url = format!("{FILES_URL}/{}{}.sng", chart.md5, if novideo { "_novideo" } else { "" });
 
@@ -517,24 +509,20 @@ impl Client {
         let dest = unique_path(&parent, &stem, ext);
         let tmp = parent.join(format!(".{}.part", chart.md5));
 
-        self.retry(|| {
-            let mut resp = self.check(self.http.get(&url).send()?)?;
+        self.retry(async || {
+            let mut resp = self.check(self.http.get(&url).send().await?).await?;
             let total = resp.content_length();
             let mut file = File::create(&tmp)?;
-            let mut buf = vec![0u8; 64 * 1024];
             let mut done = 0u64;
-            loop {
-                let n = resp.read(&mut buf)?;
-                if n == 0 {
-                    break;
-                }
-                file.write_all(&buf[..n])?;
-                done += n as u64;
+            while let Some(piece) = resp.chunk().await? {
+                file.write_all(&piece)?;
+                done += piece.len() as u64;
                 progress(done, total);
             }
             file.sync_all()?;
             Ok(())
         })
+        .await
         .inspect_err(|_| {
             let _ = fs::remove_file(&tmp);
         })?;
@@ -548,6 +536,66 @@ impl Client {
         let _ = fs::remove_file(&tmp);
         finished?;
         Ok(dest)
+    }
+
+    /// Downloads a chart into the songs folder the browser was given (as a .sng file or an
+    /// extracted chart folder), or, without one, as an ordinary download (always a .sng then).
+    /// Returns where it went, relative to the songs folder.
+    #[cfg(target_arch = "wasm32")]
+    pub async fn download(&self, chart: &Chart, settings: &Settings, mut progress: impl FnMut(u64, Option<u64>)) -> Result<PathBuf> {
+        use crate::web;
+
+        let novideo = chart.has(flag::VIDEO) && !settings.video;
+        let url = format!("{FILES_URL}/{}{}.sng", chart.md5, if novideo { "_novideo" } else { "" });
+        let data = self
+            .retry(async || {
+                let mut resp = self.check(self.http.get(&url).send().await?).await?;
+                let total = resp.content_length();
+                let mut data = Vec::with_capacity(total.unwrap_or(0) as usize);
+                while let Some(piece) = resp.chunk().await? {
+                    data.extend_from_slice(&piece);
+                    progress(data.len() as u64, total);
+                }
+                Ok(data)
+            })
+            .await?;
+
+        let rel = resolve_folder_name(&settings.folder_name, chart);
+        if web::folder_name().is_none() || !web::folder_allowed().await {
+            let name = format!("{}.sng", rel.rsplit('/').next().unwrap_or(&rel));
+            web::save_file(&name, &data);
+            return Ok(PathBuf::from(name));
+        }
+        let (parent, stem) = match rel.rsplit_once('/') {
+            Some((p, s)) => (format!("{p}/"), s.to_owned()),
+            None => (String::new(), rel.clone()),
+        };
+        let ext = match settings.format {
+            DownloadFormat::Sng => ".sng",
+            DownloadFormat::Folder => "",
+        };
+        let mut dest = format!("{parent}{stem}{ext}");
+        let mut n = 2;
+        while web::folder_has(&dest).await {
+            dest = format!("{parent}{stem} ({n}){ext}");
+            n += 1;
+        }
+        match settings.format {
+            DownloadFormat::Sng => web::folder_write(&dest, &data, false).await?,
+            DownloadFormat::Folder => {
+                let written = async {
+                    for (name, bytes) in sng::files(&data)? {
+                        web::folder_write(&format!("{dest}/{name}"), &bytes, false).await?;
+                    }
+                    anyhow::Ok(())
+                };
+                if let Err(e) = written.await {
+                    web::folder_remove(&dest).await;
+                    return Err(e);
+                }
+            }
+        }
+        Ok(PathBuf::from(dest))
     }
 }
 
@@ -604,6 +652,7 @@ pub fn sanitize_filename(name: &str) -> String {
 }
 
 /// `<dir>/<stem><ext>`, or `<stem> (2)<ext>` etc. if that already exists.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn unique_path(dir: &Path, stem: &str, ext: &str) -> PathBuf {
     let mut path = dir.join(format!("{stem}{ext}"));
     let mut n = 2;
@@ -616,29 +665,51 @@ pub fn unique_path(dir: &Path, stem: &str, ext: &str) -> PathBuf {
 
 /// Charts already downloaded into a folder (md5 -> where it was saved), so they're skipped
 /// next time and can be shown in the file manager.
+///
+/// The desktop keeps the list in the songs folder. The web keeps it in the browser (and adds
+/// to the one in the songs folder too, when it has the folder).
 pub struct Manifest {
     files: std::collections::HashMap<String, PathBuf>,
     path: PathBuf,
+    /// The web's copy of the list, and how many charts were added since it was last saved.
+    #[cfg(target_arch = "wasm32")]
+    text: String,
+    #[cfg(target_arch = "wasm32")]
+    unsaved: usize,
 }
 
 /// Separates the md5 and the saved path on each line of the download list.
 const SEP: char = '\t';
 
+/// The download list's name in the songs folder.
+#[cfg(target_arch = "wasm32")]
+pub const MANIFEST_NAME: &str = MANIFEST;
+
+fn manifest_lines(text: &str) -> impl Iterator<Item = (String, PathBuf)> + '_ {
+    text.lines().filter_map(|l| {
+        let (md5, file) = l.split_once(SEP).unwrap_or((l, ""));
+        (!md5.is_empty()).then(|| (md5.to_owned(), PathBuf::from(file)))
+    })
+}
+
 impl Manifest {
     pub fn load(dir: &Path) -> Self {
+        #[cfg(not(target_arch = "wasm32"))]
         let path = dir.join(MANIFEST);
-        let files = match File::open(&path) {
-            Ok(f) => BufReader::new(f)
-                .lines()
-                .map_while(Result::ok)
-                .filter_map(|l| {
-                    let (md5, file) = l.split_once(SEP).unwrap_or((&l, ""));
-                    (!md5.is_empty()).then(|| (md5.to_owned(), PathBuf::from(file)))
-                })
-                .collect(),
-            Err(_) => std::collections::HashMap::new(),
+        #[cfg(target_arch = "wasm32")]
+        let path = {
+            let _ = dir;
+            crate::catalogue::data_dir().join("downloaded.txt")
         };
-        Self { files, path }
+        let text = store::read_string(&path).unwrap_or_default();
+        Self {
+            files: manifest_lines(&text).collect(),
+            path,
+            #[cfg(target_arch = "wasm32")]
+            text,
+            #[cfg(target_arch = "wasm32")]
+            unsaved: 0,
+        }
     }
 
     pub fn contains(&self, md5: &str) -> bool {
@@ -647,16 +718,63 @@ impl Manifest {
 
     /// Where a downloaded chart was saved, if it's still there.
     pub fn location(&self, md5: &str) -> Option<PathBuf> {
+        #[cfg(target_arch = "wasm32")]
+        return {
+            let _ = md5;
+            None
+        };
+        #[cfg(not(target_arch = "wasm32"))]
         self.files.get(md5).filter(|p| !p.as_os_str().is_empty() && p.exists()).cloned()
     }
 
+    /// The line `add` writes for a chart.
+    pub fn line(chart: &Chart, file: &Path) -> String {
+        format!("{}{SEP}{}\n", chart.md5, file.display())
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn add(&mut self, chart: &Chart, file: &Path) -> Result<()> {
+        use std::io::Write;
         if let Some(dir) = self.path.parent() {
-            fs::create_dir_all(dir)?;
+            std::fs::create_dir_all(dir)?;
         }
-        let mut f = OpenOptions::new().create(true).append(true).open(&self.path)?;
-        writeln!(f, "{}{SEP}{}", chart.md5, file.display())?;
+        let mut f = std::fs::OpenOptions::new().create(true).append(true).open(&self.path)?;
+        f.write_all(Self::line(chart, file).as_bytes())?;
         self.files.insert(chart.md5.clone(), file.to_path_buf());
         Ok(())
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub fn add(&mut self, chart: &Chart, file: &Path) -> Result<()> {
+        self.text.push_str(&Self::line(chart, file));
+        self.files.insert(chart.md5.clone(), file.to_path_buf());
+        // Saved every so often (it's rewritten whole), and at the end of each download.
+        self.unsaved += 1;
+        if self.unsaved >= 25 {
+            self.flush();
+        }
+        Ok(())
+    }
+
+    /// Saves charts added since the list was last saved.
+    pub fn flush(&mut self) {
+        #[cfg(target_arch = "wasm32")]
+        if self.unsaved > 0 {
+            self.unsaved = 0;
+            let _ = store::write(&self.path, self.text.as_bytes());
+        }
+    }
+
+    /// Adds the charts in another download list (the songs folder's, on the web).
+    #[cfg(target_arch = "wasm32")]
+    pub fn merge(&mut self, text: &str) {
+        for (md5, file) in manifest_lines(text) {
+            if !self.files.contains_key(&md5) {
+                self.text.push_str(&format!("{md5}{SEP}{}\n", file.display()));
+                self.files.insert(md5, file);
+                self.unsaved += 1;
+            }
+        }
+        self.flush();
     }
 }

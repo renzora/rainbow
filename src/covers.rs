@@ -5,18 +5,16 @@
 //! now load before the ones you've already scrolled past.
 
 use std::collections::{HashMap, VecDeque};
-use std::fs;
-use std::io::Cursor;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
-use std::sync::{Arc, Condvar, Mutex};
-use std::thread;
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use web_time::Duration;
 
 use eframe::egui;
-use image::imageops::FilterType;
 
 use crate::api::FILES_URL;
+use crate::net::Http;
 
 /// Thumbnail size for table rows, in pixels.
 pub const THUMB: u32 = 96;
@@ -45,14 +43,18 @@ struct Done {
     image: Option<egui::ColorImage>,
 }
 
-type Queue = Arc<(Mutex<Vec<Key>>, Condvar)>;
+type Queue = Arc<Mutex<Vec<Key>>>;
 
 pub struct Covers {
     slots: HashMap<Key, Slot>,
     /// Ready textures, oldest first, for eviction.
     order: VecDeque<Key>,
     queue: Queue,
+    /// How many loaders are running (each takes covers from the queue until it's empty).
+    loaders: Arc<AtomicUsize>,
+    tx: Sender<Done>,
     done: Receiver<Done>,
+    http: Http,
     ctx: egui::Context,
 }
 
@@ -62,19 +64,18 @@ fn cache_dir() -> PathBuf {
 
 impl Covers {
     pub fn new(ctx: &egui::Context) -> Self {
-        let queue: Queue = Arc::new((Mutex::new(Vec::new()), Condvar::new()));
         let (tx, done) = channel();
-        let http = reqwest::blocking::Client::builder()
-            .user_agent(concat!("rainbow/", env!("CARGO_PKG_VERSION")))
-            .timeout(Duration::from_secs(30))
-            .build()
-            .expect("failed to create HTTP client");
-        let _ = fs::create_dir_all(cache_dir());
-        for _ in 0..WORKERS {
-            let (queue, tx, http, ctx) = (queue.clone(), tx.clone(), http.clone(), ctx.clone());
-            thread::spawn(move || worker(queue, tx, http, ctx));
+        let http = Http::new(Some(Duration::from_secs(30)));
+        Self {
+            slots: HashMap::new(),
+            order: VecDeque::new(),
+            queue: Queue::default(),
+            loaders: Arc::new(AtomicUsize::new(0)),
+            tx,
+            done,
+            http,
+            ctx: ctx.clone(),
         }
-        Self { slots: HashMap::new(), order: VecDeque::new(), queue, done, ctx: ctx.clone() }
     }
 
     /// The cover texture if it's loaded; otherwise starts loading it and returns None.
@@ -82,14 +83,18 @@ impl Covers {
         let key = Key { art: art.to_owned(), size };
         if !self.slots.contains_key(&key) {
             self.slots.insert(key.clone(), Slot::Loading);
-            let (lock, cvar) = &*self.queue;
-            let mut q = lock.lock().unwrap();
+            let mut q = self.queue.lock().unwrap();
             q.push(key);
             if q.len() > MAX_QUEUE {
                 let stale = q.remove(0);
                 self.slots.remove(&stale); // re-requested if it comes back on screen
             }
-            cvar.notify_one();
+            drop(q);
+            if self.loaders.load(Ordering::SeqCst) < WORKERS {
+                self.loaders.fetch_add(1, Ordering::SeqCst);
+                let (queue, loaders, tx, http, ctx) = (self.queue.clone(), self.loaders.clone(), self.tx.clone(), self.http.clone(), self.ctx.clone());
+                crate::task::spawn(move || loader(queue, loaders, tx, http, ctx));
+            }
             return None;
         }
         match self.slots.get(&key) {
@@ -119,39 +124,40 @@ impl Covers {
     }
 }
 
-fn worker(queue: Queue, tx: Sender<Done>, http: reqwest::blocking::Client, ctx: egui::Context) {
+/// Loads covers from the queue, newest first, until it's empty.
+async fn loader(queue: Queue, loaders: Arc<AtomicUsize>, tx: Sender<Done>, http: Http, ctx: egui::Context) {
     loop {
-        let key = {
-            let (lock, cvar) = &*queue;
-            let mut q = lock.lock().unwrap();
-            while q.is_empty() {
-                q = cvar.wait(q).unwrap();
-            }
-            q.pop().unwrap() // newest first
-        };
-        let image = load(&http, &key);
+        let Some(key) = queue.lock().unwrap().pop() else { break };
+        let image = load(&http, &key).await;
         if tx.send(Done { key, image }).is_err() {
-            return;
+            break;
         }
         ctx.request_repaint();
     }
+    loaders.fetch_sub(1, Ordering::SeqCst);
 }
 
-fn load(http: &reqwest::blocking::Client, key: &Key) -> Option<egui::ColorImage> {
+async fn load(http: &Http, key: &Key) -> Option<egui::ColorImage> {
+    use image::imageops::FilterType;
     // Art hashes come from the API; only allow plain hex so they're safe as file names.
     if key.art.is_empty() || !key.art.chars().all(|c| c.is_ascii_hexdigit()) {
         return None;
     }
     let path = cache_dir().join(format!("{}_{}.jpg", key.art, key.size));
-    let img = match fs::read(&path).ok().and_then(|b| image::load_from_memory(&b).ok()) {
+    let img = match crate::store::read(&path).and_then(|b| image::load_from_memory(&b).ok()) {
         Some(img) => img,
         None => {
-            let bytes = http.get(format!("{FILES_URL}/{}.jpg", key.art)).send().ok()?.error_for_status().ok()?.bytes().ok()?;
+            let url = format!("{FILES_URL}/{}.jpg", key.art);
+            let bytes = http.get(&url).send().await.ok()?.error_for_status().ok()?.bytes().await.ok()?;
             let full = image::load_from_memory(&bytes).ok()?;
             let small = full.resize(key.size, key.size, FilterType::Triangle);
-            let mut out = Cursor::new(Vec::new());
-            if small.to_rgb8().write_to(&mut out, image::ImageFormat::Jpeg).is_ok() {
-                let _ = fs::write(&path, out.into_inner());
+            // (The browser keeps its own copy of downloads, so the web version doesn't save these.)
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                let mut out = std::io::Cursor::new(Vec::new());
+                if small.to_rgb8().write_to(&mut out, image::ImageFormat::Jpeg).is_ok() {
+                    let _ = crate::store::write(&path, &out.into_inner());
+                }
             }
             small
         }

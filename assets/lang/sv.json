@@ -593,6 +593,12 @@
     "🌈  Show all songs": "🌈  Visa alla låtar",
     "This chart isn't on Chorus Encore": "Den här charten finns inte på Chorus Encore",
     "{song} isn't on Chorus Encore, so it can't be downloaded here": "{song} finns inte på Chorus Encore, så den kan inte laddas ner här",
-    "🔍  Search the web": "🔍  Sök på webben"
+    "🔍  Search the web": "🔍  Sök på webben",
+    "✔  Downloaded": "✔  Nedladdad",
+    "✖ Forget": "✖ Glöm",
+    "Save charts as ordinary downloads instead": "Spara charts som vanliga nedladdningar i stället",
+    "None chosen: charts are saved as ordinary downloads": "Ingen vald: charts sparas som vanliga nedladdningar",
+    "Point this at your Clone Hero or YARG songs folder. The browser asks once each visit before Rainbow saves into it.": "Välj din låtmapp för Clone Hero eller YARG. Webbläsaren frågar en gång per besök innan Rainbow sparar i den.",
+    "This browser saves charts as ordinary downloads (always as .sng files). In Chrome or Edge, Rainbow can save straight into your songs folder.": "Den här webbläsaren sparar charts som vanliga nedladdningar (alltid som .sng-filer). I Chrome eller Edge kan Rainbow spara direkt i din låtmapp."
   }
 }

@@ -593,6 +593,12 @@
     "🌈  Show all songs": "🌈  すべての曲を表示",
     "This chart isn't on Chorus Encore": "この譜面は Chorus Encore にありません",
     "{song} isn't on Chorus Encore, so it can't be downloaded here": "{song} は Chorus Encore にないため、ここではダウンロードできません",
-    "🔍  Search the web": "🔍  ウェブで検索"
+    "🔍  Search the web": "🔍  ウェブで検索",
+    "✔  Downloaded": "✔  ダウンロード済み",
+    "✖ Forget": "✖ 解除",
+    "Save charts as ordinary downloads instead": "代わりに通常のダウンロードとして保存",
+    "None chosen: charts are saved as ordinary downloads": "未選択：譜面は通常のダウンロードとして保存されます",
+    "Point this at your Clone Hero or YARG songs folder. The browser asks once each visit before Rainbow saves into it.": "Clone Hero または YARG の曲フォルダーを指定します。Rainbow が保存する前に、ブラウザーが訪問ごとに一度確認します。",
+    "This browser saves charts as ordinary downloads (always as .sng files). In Chrome or Edge, Rainbow can save straight into your songs folder.": "このブラウザーでは譜面は通常のダウンロード（常に .sng ファイル）として保存されます。Chrome や Edge なら曲フォルダーに直接保存できます。"
   }
 }

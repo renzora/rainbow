@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Rainbow</title>
+<meta name="description" content="Search and download Clone Hero charts from Chorus Encore, in your browser.">
+<link rel="icon" type="image/png" href="icon.png">
+<style>
+  :root {
+    --bg: #f4f5f8;
+    --text: #1d2130;
+    --muted: #687086;
+    --track: #dde0e8;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #16181f;
+      --text: #e6e8ef;
+      --muted: #9aa1b5;
+      --track: #2b2f3b;
+    }
+  }
+  html, body {
+    margin: 0;
+    height: 100%;
+    overflow: hidden;
+    background: var(--bg);
+    color: var(--text);
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  canvas {
+    position: fixed;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    outline: none;
+  }
+  #loading {
+    position: fixed;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 14px;
+    background: var(--bg);
+    padding: 0 16px;
+    text-align: center;
+  }
+  #loading img { width: 88px; height: 88px; }
+  #loading h1 { margin: 0; font-size: 26px; font-weight: 700; }
+  #loading p { margin: 0; color: var(--muted); font-size: 14px; }
+  .bar {
+    width: min(260px, 70vw);
+    height: 6px;
+    border-radius: 3px;
+    background: var(--track);
+    overflow: hidden;
+  }
+  .bar div {
+    width: 40%;
+    height: 100%;
+    border-radius: 3px;
+    background: linear-gradient(90deg, #e84a5f, #f6a623, #3ec46d, #3b8beb, #9b59d0);
+    animation: slide 1.2s ease-in-out infinite;
+  }
+  @keyframes slide {
+    from { transform: translateX(-100%); }
+    to { transform: translateX(250%); }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .bar div { animation: none; width: 100%; }
+  }
+</style>
+</head>
+<body>
+<canvas id="rainbow"></canvas>
+<div id="loading">
+  <img src="icon.png" alt="">
+  <h1>Rainbow</h1>
+  <div class="bar"><div></div></div>
+  <p id="status">Loading…</p>
+  <noscript><p>Rainbow needs JavaScript (and WebAssembly) to run.</p></noscript>
+</div>
+<script type="module">
+  import init from "./pkg/rainbow.js";
+  init().catch((e) => {
+    console.error(e);
+    document.getElementById("status").textContent = "Rainbow couldn't start in this browser: " + e;
+  });
+</script>
+</body>
+</html>

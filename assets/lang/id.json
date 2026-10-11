@@ -593,6 +593,12 @@
     "🌈  Show all songs": "🌈  Tampilkan semua lagu",
     "This chart isn't on Chorus Encore": "Chart ini tidak ada di Chorus Encore",
     "{song} isn't on Chorus Encore, so it can't be downloaded here": "{song} tidak ada di Chorus Encore, jadi tidak bisa diunduh di sini",
-    "🔍  Search the web": "🔍  Cari di web"
+    "🔍  Search the web": "🔍  Cari di web",
+    "✔  Downloaded": "✔  Sudah diunduh",
+    "✖ Forget": "✖ Lupakan",
+    "Save charts as ordinary downloads instead": "Simpan chart sebagai unduhan biasa saja",
+    "None chosen: charts are saved as ordinary downloads": "Belum dipilih: chart disimpan sebagai unduhan biasa",
+    "Point this at your Clone Hero or YARG songs folder. The browser asks once each visit before Rainbow saves into it.": "Arahkan ke folder lagu Clone Hero atau YARG kamu. Browser bertanya sekali setiap kunjungan sebelum Rainbow menyimpan ke sana.",
+    "This browser saves charts as ordinary downloads (always as .sng files). In Chrome or Edge, Rainbow can save straight into your songs folder.": "Browser ini menyimpan chart sebagai unduhan biasa (selalu berupa file .sng). Di Chrome atau Edge, Rainbow bisa menyimpan langsung ke folder lagumu."
   }
 }

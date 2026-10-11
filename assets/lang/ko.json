@@ -593,6 +593,12 @@
     "🌈  Show all songs": "🌈  모든 곡 보기",
     "This chart isn't on Chorus Encore": "이 채보는 Chorus Encore에 없습니다",
     "{song} isn't on Chorus Encore, so it can't be downloaded here": "{song}은(는) Chorus Encore에 없어서 여기서 내려받을 수 없습니다",
-    "🔍  Search the web": "🔍  웹에서 검색"
+    "🔍  Search the web": "🔍  웹에서 검색",
+    "✔  Downloaded": "✔  다운로드됨",
+    "✖ Forget": "✖ 해제",
+    "Save charts as ordinary downloads instead": "대신 일반 다운로드로 저장",
+    "None chosen: charts are saved as ordinary downloads": "선택 안 함: 차트가 일반 다운로드로 저장됩니다",
+    "Point this at your Clone Hero or YARG songs folder. The browser asks once each visit before Rainbow saves into it.": "Clone Hero 또는 YARG 곡 폴더를 지정하세요. Rainbow가 저장하기 전에 브라우저가 방문할 때마다 한 번 묻습니다.",
+    "This browser saves charts as ordinary downloads (always as .sng files). In Chrome or Edge, Rainbow can save straight into your songs folder.": "이 브라우저는 차트를 일반 다운로드(항상 .sng 파일)로 저장합니다. Chrome이나 Edge에서는 곡 폴더에 바로 저장할 수 있습니다."
   }
 }

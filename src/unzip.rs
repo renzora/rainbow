@@ -3,7 +3,7 @@
 use std::fs::{self, File};
 use std::io;
 use std::path::{Component, Path, PathBuf};
-use std::time::{Duration, SystemTime};
+use web_time::{Duration, SystemTime};
 
 use anyhow::{Context, Result};
 

@@ -7,24 +7,21 @@
 //! With no other filters that's the site's default view: 100% speed, no modifiers, any controller.
 
 use std::collections::HashMap;
-use std::sync::mpsc::{Receiver, channel};
-use std::thread;
-use std::time::Duration;
+use web_time::Duration;
 
 use anyhow::{Context, Result, bail};
 use eframe::egui;
 use egui::{Color32, CornerRadius, RichText, Sense, vec2};
-use reqwest::StatusCode;
-use reqwest::blocking::Client;
 use serde_json::Value;
 
 use crate::api::{self, Chart, DIFFICULTIES, FILES_URL, INSTRUMENTS, flag};
+use crate::net::{Http as Client, StatusCode};
+use crate::task::Load;
 use crate::i18n::t;
 use crate::preview::thousands;
 use crate::trackhash::{self, Modifiers};
 use crate::{sng, theme, tr};
 
-const API_URL: &str = "https://api.clonehero.net/v1";
 const SITE_URL: &str = "https://leaderboards.clonehero.net";
 const TOP: usize = 10;
 /// How much of the .sng to fetch for its header; the notes come in a second request.
@@ -53,35 +50,6 @@ struct Board {
     entries: Vec<Entry>,
 }
 
-enum Load<T> {
-    Loading(Receiver<Result<T, String>>),
-    Ready(T),
-    Failed(String),
-}
-
-impl<T: Send + 'static> Load<T> {
-    fn start(ctx: &egui::Context, work: impl FnOnce() -> Result<T> + Send + 'static) -> Self {
-        let (tx, rx) = channel();
-        let ctx = ctx.clone();
-        thread::spawn(move || {
-            let _ = tx.send(work().map_err(|e| format!("{e:#}")));
-            ctx.request_repaint();
-        });
-        Load::Loading(rx)
-    }
-
-    fn poll(&mut self) {
-        if let Load::Loading(rx) = self
-            && let Ok(result) = rx.try_recv()
-        {
-            *self = match result {
-                Ok(v) => Load::Ready(v),
-                Err(e) => Load::Failed(e),
-            };
-        }
-    }
-}
-
 /// The leaderboard section of the details panel.
 pub struct Panel {
     http: Client,
@@ -99,18 +67,16 @@ pub struct Panel {
 
 impl Panel {
     pub fn new() -> Self {
-        let http = Client::builder()
-            .user_agent(concat!("rainbow/", env!("CARGO_PKG_VERSION")))
-            .connect_timeout(Duration::from_secs(20))
-            .timeout(Duration::from_secs(60))
-            .build()
-            .unwrap_or_default();
+        let http = Client::new(Some(Duration::from_secs(60)));
         Self { http, md5: String::new(), hashes: HashMap::new(), boards: HashMap::new(), instrument: "guitar", difficulty: "expert", refresh: false }
     }
 
     /// Shows the leaderboard section for `c`, starting on the instrument and difficulty being
     /// searched for when the chart has them. Nothing is downloaded while it's collapsed.
     pub fn show(&mut self, ui: &mut egui::Ui, c: &Chart, instrument: Option<u8>, difficulty: Option<u8>) {
+        if !crate::players::available() {
+            return;
+        }
         // Refresh sits at the far end of the section's header.
         let refresh = "↻".to_owned();
         if crate::section_ex(ui, "leaderboard", &t("🏆  Clone Hero Leaderboard"), None, Some(&refresh), |ui| self.contents(ui, c, instrument, difficulty)) {
@@ -126,7 +92,7 @@ impl Panel {
         }
         let hashes = self.hashes.entry(c.md5.clone()).or_insert_with(|| {
             let (http, chart) = (self.http.clone(), c.clone());
-            Load::start(&ctx, move || chart_hashes(&http, &chart))
+            Load::start(&ctx, move || async move { chart_hashes(&http, &chart).await })
         });
         hashes.poll();
 
@@ -185,7 +151,7 @@ impl Panel {
         let key = (hash.clone(), self.instrument, self.difficulty);
         let board = self.boards.entry(key.clone()).or_insert_with(|| {
             let (http, instrument, difficulty) = (self.http.clone(), self.instrument, self.difficulty);
-            Load::start(&ctx, move || fetch_board(&http, &hash, instrument, difficulty))
+            Load::start(&ctx, move || async move { fetch_board(&http, &hash, instrument, difficulty).await })
         });
         board.poll();
         let mut refresh = false;
@@ -333,18 +299,22 @@ pub(crate) fn instrument_name(id: &str) -> String {
 }
 
 /// Gets the .sng's header and notes with range requests, and hashes every track.
-fn chart_hashes(http: &Client, c: &Chart) -> Result<Hashes> {
+async fn chart_hashes(http: &Client, c: &Chart) -> Result<Hashes> {
     let novideo = if c.has(flag::VIDEO) { "_novideo" } else { "" };
     let url = format!("{FILES_URL}/{}{novideo}.sng", c.md5);
-    let fetch = |start: u64, len: u64| -> Result<Vec<u8>> {
-        let resp = http.get(&url).header(reqwest::header::RANGE, format!("bytes={start}-{}", start + len.max(1) - 1)).send()?;
+    let fetch = async |start: u64, len: u64| -> Result<Vec<u8>> {
+        let range = format!("bytes={start}-{}", start + len.max(1) - 1);
+        let resp = http.get(&url).header("range", &range).send().await?;
         let partial = resp.status() == StatusCode::PARTIAL_CONTENT;
-        let bytes = resp.error_for_status()?.bytes()?;
+        let bytes = resp.error_for_status()?.bytes().await?;
         // A server that ignores the range sends the whole file.
-        Ok(if partial { bytes.to_vec() } else { bytes.get(start as usize..).unwrap_or_default().iter().take(len as usize).copied().collect() })
+        Ok(if partial { bytes } else { bytes.get(start as usize..).unwrap_or_default().iter().take(len as usize).copied().collect() })
     };
-    let head = fetch(0, HEADER_BYTES)?;
-    let contents = sng::contents(&head).or_else(|_| sng::contents(&fetch(0, 16 * 1024 * 1024)?)).context("not a readable .sng")?;
+    let head = fetch(0, HEADER_BYTES).await?;
+    let contents = match sng::contents(&head) {
+        Ok(c) => c,
+        Err(_) => sng::contents(&fetch(0, 16 * 1024 * 1024).await?).context("not a readable .sng")?,
+    };
 
     // Like scan-chart: notes.mid, then notes.chart, then any other .mid/.chart.
     let mut candidates: Vec<&(String, usize, usize)> = contents
@@ -360,7 +330,7 @@ fn chart_hashes(http: &Client, c: &Chart) -> Result<Hashes> {
         (!(n == "notes.mid" || n == "notes.chart"), !n.ends_with(".mid"))
     });
     let Some((name, offset, len)) = candidates.first() else { bail!("it has no notes.chart or notes.mid") };
-    let notes = contents.unmask(&fetch(*offset as u64, *len as u64)?);
+    let notes = contents.unmask(&fetch(*offset as u64, *len as u64).await?);
     if notes.len() != *len {
         bail!("couldn't download the notes");
     }
@@ -368,9 +338,9 @@ fn chart_hashes(http: &Client, c: &Chart) -> Result<Hashes> {
     trackhash::track_hashes(&notes, name.to_lowercase().ends_with(".mid"), &Modifiers::from_ini(&values))
 }
 
-fn fetch_board(http: &Client, track_hash: &str, instrument: &str, difficulty: &str) -> Result<Board> {
-    let url = format!("{API_URL}/scores?trackHash={track_hash}&instrument={instrument}&difficulty={difficulty}&topScores={TOP}");
-    let v: Value = http.get(url).send()?.error_for_status()?.json()?;
+async fn fetch_board(http: &Client, track_hash: &str, instrument: &str, difficulty: &str) -> Result<Board> {
+    let path = format!("/scores?trackHash={track_hash}&instrument={instrument}&difficulty={difficulty}&topScores={TOP}");
+    let v: Value = crate::players::get_url(http, &path).await?;
     let num = |v: &Value| v.as_u64().or_else(|| v.as_str()?.parse().ok()).unwrap_or(0);
     let text = |v: &Value| v.as_str().map(str::to_owned).unwrap_or_else(|| if v.is_null() { String::new() } else { v.to_string() });
     let summary = &v["summary"];
@@ -405,12 +375,12 @@ mod tests {
     #[test]
     #[ignore]
     fn fetch_live() {
-        let http = super::Client::new();
+        let http = super::Client::new(None);
         for md5 in std::env::var("LEADERBOARD_MD5").expect("set LEADERBOARD_MD5").split(',') {
             let chart = crate::api::Chart { md5: md5.to_owned(), ..Default::default() };
-            let hashes = super::chart_hashes(&http, &chart).unwrap();
+            let hashes = pollster::block_on(super::chart_hashes(&http, &chart)).unwrap();
             let (instrument, difficulty, hash) = hashes.iter().find(|h| h.0 == "guitar" && h.1 == "expert").or(hashes.first()).unwrap();
-            let board = super::fetch_board(&http, hash, instrument, difficulty).unwrap();
+            let board = pollster::block_on(super::fetch_board(&http, hash, instrument, difficulty)).unwrap();
             println!("{md5}: {} tracks; {instrument} {difficulty} {hash}: {} players, {} plays", hashes.len(), board.players, board.plays);
             for e in &board.entries {
                 println!("  #{} {} {} {}% ★{} fc={} {}", e.placement, e.username, e.score, e.accuracy, e.stars, e.fc, e.controller);

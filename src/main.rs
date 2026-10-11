@@ -1,22 +1,21 @@
-//! Rainbow: a small desktop alternative to Bridge for Chorus Encore (enchor.us).
+//! Rainbow: a small desktop alternative to Bridge for Chorus Encore (enchor.us), which also
+//! runs in the browser (see web/ and src/web.rs).
 
 #![windows_subsystem = "windows"]
 
 mod api;
 mod catalogue;
 mod chart;
-mod rockband;
 mod covers;
 mod drums;
 mod datepicker;
-mod dta;
 mod flags;
 mod filter;
 mod games;
 mod i18n;
-mod import;
 mod leaderboard;
 mod links;
+mod net;
 mod optimal;
 mod players;
 mod pathchart;
@@ -25,18 +24,32 @@ mod query;
 mod scores;
 mod settings;
 mod sng;
-mod stfs;
+mod store;
+mod task;
 mod theme;
 mod trackhash;
-mod unzip;
+#[cfg_attr(target_arch = "wasm32", path = "updater_web.rs")]
 mod updater;
+
+// Desktop only: importing zips and Rock Band packages from the songs folder.
+#[cfg(not(target_arch = "wasm32"))]
+mod dta;
+#[cfg(not(target_arch = "wasm32"))]
+mod import;
+#[cfg(not(target_arch = "wasm32"))]
+mod rockband;
+#[cfg(not(target_arch = "wasm32"))]
+mod stfs;
+#[cfg(not(target_arch = "wasm32"))]
+mod unzip;
+#[cfg(target_arch = "wasm32")]
+mod web;
 
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
-use std::thread;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use web_time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use eframe::egui;
 use egui::{Color32, CornerRadius, CursorIcon, RichText, Sense, vec2};
@@ -63,7 +76,22 @@ const LOGO_PNG: &[u8] = include_bytes!("../assets/icon-256.png");
 const RENZORA_PNG: &[u8] = include_bytes!("../assets/renzora.png");
 const RENZORA_URL: &str = "https://github.com/renzora";
 
+#[cfg(not(target_arch = "wasm32"))]
 fn main() -> eframe::Result {
+    // `rainbow --update-catalogue <file>`: brings a catalogue file up to date and quits (this is
+    // how the copy published with the web version is refreshed; see .github/workflows/pages.yml).
+    let args: Vec<String> = std::env::args().collect();
+    if let Some(k) = args.iter().position(|a| a == "--update-catalogue") {
+        let Some(file) = args.get(k + 1) else {
+            eprintln!("usage: rainbow --update-catalogue <file>");
+            std::process::exit(2);
+        };
+        if let Err(e) = update_catalogue_file(std::path::Path::new(file)) {
+            eprintln!("couldn't update {file}: {e:#}");
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
     // Opened from a rainbow:// link while Rainbow is already running: pass it over and stop.
     let link = links::from_args();
     if let Some(id) = &link
@@ -83,6 +111,46 @@ fn main() -> eframe::Result {
     eframe::run_native("Rainbow", options, Box::new(move |cc| Ok(Box::new(App::new(&cc.egui_ctx, link)))))
 }
 
+/// Updates (or builds) the catalogue in `file`, printing progress.
+#[cfg(not(target_arch = "wasm32"))]
+fn update_catalogue_file(file: &std::path::Path) -> anyhow::Result<()> {
+    let mut cat = std::fs::read(file).ok().and_then(|b| Catalogue::from_json(&b)).unwrap_or_default();
+    cat.file = Some(file.to_owned());
+    eprintln!("{} charts to start with", cat.charts.len());
+    let client = Client::new()?.with_status(Arc::new(|m| eprintln!("{m}")));
+    let stop = AtomicBool::new(false);
+    let added = pollster::block_on(cat.update(&client, &stop, |p| {
+        let catalogue::Progress::Page { page, pages, charts, .. } = p;
+        eprintln!("page {page}/{pages}: {charts} charts");
+    }))?;
+    anyhow::ensure!(cat.complete, "the catalogue is still incomplete");
+    eprintln!("{} charts ({added} new)", cat.charts.len());
+    Ok(())
+}
+
+/// The web version: reads its saved files, then runs in the page's canvas (see web/index.html).
+#[cfg(target_arch = "wasm32")]
+fn main() {
+    use wasm_bindgen::JsCast;
+    console_error_panic_hook::set_once();
+    wasm_bindgen_futures::spawn_local(async {
+        store::load().await;
+        let link = web::link_from_url();
+        let canvas = web_sys::window()
+            .and_then(|w| w.document())
+            .and_then(|d| d.get_element_by_id("rainbow"))
+            .and_then(|e| e.dyn_into::<web_sys::HtmlCanvasElement>().ok())
+            .expect("the page has no canvas for Rainbow");
+        let started = eframe::WebRunner::new()
+            .start(canvas, eframe::WebOptions::default(), Box::new(move |cc| Ok(Box::new(App::new(&cc.egui_ctx, link)))))
+            .await;
+        web::loaded();
+        if let Err(e) = started {
+            web_sys::console::error_1(&e);
+        }
+    });
+}
+
 /// Messages from background threads to the UI.
 enum Msg {
     /// Results of a direct Encore search, used while the catalogue is still downloading.
@@ -98,6 +166,9 @@ enum Msg {
     JobDone,
     /// A rainbow:// link to open (a chart id: an MD5 or the start of one).
     OpenLink(String),
+    /// The web version has downloaded a font it leaves out at first (see theme::noto_sans_jp).
+    #[cfg(target_arch = "wasm32")]
+    FontReady,
 }
 
 enum CatStatus {
@@ -131,21 +202,17 @@ impl Pending {
     }
 
     fn load() -> Option<Self> {
-        std::fs::read(Self::path())
-            .ok()
-            .and_then(|b| serde_json::from_slice(&b).ok())
+        store::read(&Self::path()).and_then(|b| serde_json::from_slice(&b).ok())
     }
 
     fn save(&self) {
-        let path = Self::path();
-        let _ = std::fs::create_dir_all(path.parent().unwrap());
         if let Ok(json) = serde_json::to_vec(self) {
-            let _ = std::fs::write(path, json);
+            let _ = store::write(&Self::path(), &json);
         }
     }
 
     fn clear() {
-        let _ = std::fs::remove_file(Self::path());
+        store::remove(&Self::path());
     }
 }
 
@@ -206,6 +273,7 @@ enum RowAction {
     Toggle(usize),
     Download(usize),
     Preview(usize),
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     Reveal(usize),
     Favourite(usize),
     Nav(Nav),
@@ -323,7 +391,9 @@ struct App {
 
     job: Option<Job>,
     stop: Arc<AtomicBool>,
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     unzip_running: Arc<AtomicBool>,
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     unzip_last: Option<Instant>,
     confirm: Option<Confirm>,
     /// Asking whether to quit while a download is running.
@@ -342,11 +412,14 @@ impl App {
     fn new(ctx: &egui::Context, link: Option<String>) -> Self {
         let (tx, rx) = channel();
         // Links opened while Rainbow is running come from the copies they start.
-        let (link_tx, link_ctx) = (tx.clone(), ctx.clone());
-        links::listen(move |id| {
-            let _ = link_tx.send(Msg::OpenLink(id));
-            link_ctx.request_repaint();
-        });
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let (link_tx, link_ctx) = (tx.clone(), ctx.clone());
+            links::listen(move |id| {
+                let _ = link_tx.send(Msg::OpenLink(id));
+                link_ctx.request_repaint();
+            });
+        }
         if let Some(id) = link {
             let _ = tx.send(Msg::OpenLink(id));
         }
@@ -468,7 +541,7 @@ impl App {
                 }
             }
             None => {
-                if catalogue::path().exists() {
+                if store::exists(&catalogue::path()) {
                     app.log("Catalogue format changed; downloading it again with the new fields".to_owned());
                 }
                 app.update_catalogue(false);
@@ -481,6 +554,26 @@ impl App {
             } else {
                 Pending::clear();
             }
+        }
+        // The web version leaves the big Japanese font out of the first download.
+        #[cfg(target_arch = "wasm32")]
+        {
+            let tx = app.tx.clone();
+            let ctx = ctx.clone();
+            task::spawn(move || async move {
+                let http = net::Http::new(None);
+                let font = match http.get(&web::page_url("fonts/NotoSansJP.ttf")).send().await {
+                    Ok(resp) => resp.error_for_status().ok(),
+                    Err(_) => None,
+                };
+                if let Some(resp) = font
+                    && let Ok(bytes) = resp.bytes().await
+                    && theme::WEB_NOTO_SANS_JP.set(Vec::leak(bytes)).is_ok()
+                {
+                    let _ = tx.send(Msg::FontReady);
+                    ctx.request_repaint();
+                }
+            });
         }
         // Tidy up after an update, and look for a newer version.
         updater::clean_up();
@@ -567,15 +660,22 @@ impl App {
         self.live_searching = true;
         let (client, tx) = (self.client.clone(), self.tx.clone());
         let (inst, diff) = (self.filters.instrument, self.filters.difficulty);
-        thread::spawn(move || {
+        task::spawn(move || async move {
             let found = if hashes.is_empty() {
-                client.search(&query, 1, inst, diff).map(|r| r.charts)
+                client.search(&query, 1, inst, diff).await.map(|r| r.charts)
             } else {
-                hashes
-                    .iter()
-                    .map(|h| client.find_by_hash(h))
-                    .collect::<anyhow::Result<Vec<_>>>()
-                    .map(|v| v.concat())
+                let mut found = Vec::new();
+                let mut failed = None;
+                for h in &hashes {
+                    match client.find_by_hash(h).await {
+                        Ok(charts) => found.extend(charts),
+                        Err(e) => {
+                            failed = Some(e);
+                            break;
+                        }
+                    }
+                }
+                failed.map_or(Ok(found), Err)
             };
             let msg = match found {
                 Ok(charts) => Msg::LiveResults(charts),
@@ -593,8 +693,8 @@ impl App {
         }
         self.track_lookup = true;
         let (client, tx) = (self.client.clone(), self.tx.clone());
-        thread::spawn(move || {
-            let _ = tx.send(Msg::TrackHash(client.md5s_for_track_hash(&hash).map_err(|e| format!("{e:#}"))));
+        task::spawn(move || async move {
+            let _ = tx.send(Msg::TrackHash(client.md5s_for_track_hash(&hash).await.map_err(|e| format!("{e:#}"))));
         });
     }
 
@@ -609,20 +709,38 @@ impl App {
                 complete: self.cat_complete,
                 next_page: self.cat_next_page,
                 charts: self.charts.clone(),
+                file: None,
             }
         };
         self.cat_stop.store(false, Ordering::Relaxed);
         self.cat_status = CatStatus::Building { page: cat.next_page, pages: 0, charts: cat.charts.len() };
         let (client, tx, stop) = (self.client.clone(), self.tx.clone(), self.cat_stop.clone());
-        thread::spawn(move || {
-            let result = cat.update(&client, &stop, |p| {
-                let catalogue::Progress::Page { page, pages, charts, new } = p;
-                let _ = tx.send(Msg::CataloguePage { page, pages, charts, new });
-            });
+        task::spawn(move || async move {
+            // A new visitor to the web version starts from the published copy of the catalogue.
+            #[cfg(target_arch = "wasm32")]
+            if cat.charts.is_empty() {
+                match Catalogue::snapshot().await {
+                    Ok(snapshot) => {
+                        let pages = snapshot.charts.len().div_ceil(api::MAX_PER_PAGE as usize) as u32;
+                        let _ = tx.send(Msg::CataloguePage { page: pages, pages, charts: snapshot.charts.len(), new: snapshot.charts.clone() });
+                        cat = snapshot;
+                    }
+                    Err(e) => {
+                        let _ = tx.send(Msg::Log(format!("Couldn't load the published catalogue ({e:#}); fetching it from Encore")));
+                    }
+                }
+            }
+            let result = cat
+                .update(&client, &stop, |p| {
+                    let catalogue::Progress::Page { page, pages, charts, new } = p;
+                    let _ = tx.send(Msg::CataloguePage { page, pages, charts, new });
+                })
+                .await;
             let _ = tx.send(Msg::CatalogueDone(result.map(|added| (cat, added)).map_err(|e| format!("{e:#}"))));
         });
     }
 
+#[cfg(not(target_arch = "wasm32"))]
     fn import_options(&self) -> import::Options {
         import::Options {
             unzip: self.settings.auto_extract,
@@ -858,6 +976,7 @@ impl App {
     }
 
     /// Something to pass to background imports for progress messages.
+    #[cfg(not(target_arch = "wasm32"))]
     fn reporter(&self) -> impl Fn(String) + Send + 'static {
         let tx = self.tx.clone();
         move |line: String| {
@@ -868,6 +987,14 @@ impl App {
     /// Checks the songs folder for .zip files and Rock Band CON packages every few seconds
     /// (if enabled), or right away when forced.
     fn auto_unzip(&mut self, force: bool) {
+        #[cfg(target_arch = "wasm32")]
+        let _ = force;
+        #[cfg(not(target_arch = "wasm32"))]
+        self.auto_unzip_native(force);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn auto_unzip_native(&mut self, force: bool) {
         let enabled = self.settings.auto_extract || self.settings.auto_convert;
         let due = self.unzip_last.is_none_or(|t| t.elapsed() >= Duration::from_secs(10));
         if !(force || enabled && due) || self.unzip_running.swap(true, Ordering::SeqCst) {
@@ -881,7 +1008,7 @@ impl App {
         }
         let dir = self.settings.dir.clone();
         let (report, running) = (self.reporter(), self.unzip_running.clone());
-        thread::spawn(move || {
+        std::thread::spawn(move || {
             import::process_folder(&dir, &opts, &report);
             running.store(false, Ordering::SeqCst);
         });
@@ -889,12 +1016,20 @@ impl App {
 
     /// Files dropped onto the window: convert CON files, import zips.
     fn handle_drops(&mut self, ctx: &egui::Context) {
+        #[cfg(target_arch = "wasm32")]
+        let _ = ctx;
+        #[cfg(not(target_arch = "wasm32"))]
+        self.handle_drops_native(ctx);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn handle_drops_native(&mut self, ctx: &egui::Context) {
         let dropped: Vec<std::path::PathBuf> = ctx.input(|i| i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).filter(|p| !p.as_os_str().is_empty()).collect());
         if dropped.is_empty() {
             return;
         }
         let (opts, dir, report) = (self.import_options(), self.settings.dir.clone(), self.reporter());
-        thread::spawn(move || import::import_dropped(dropped, &dir, &opts, &report));
+        std::thread::spawn(move || import::import_dropped(dropped, &dir, &opts, &report));
     }
 
     /// A hint over the whole window while files are dragged onto it.
@@ -945,19 +1080,23 @@ impl App {
             downloaded: 0,
             failed: 0,
         };
-        thread::spawn(move || {
+        task::spawn(move || async move {
             // Already-downloaded charts are skipped, so resuming just runs the same list again.
             let pending = Pending { title, charts };
             pending.save();
             let charts = pending.charts;
-            for chart in &charts {
+            for (k, chart) in charts.iter().enumerate() {
                 if w.stopped() {
                     break;
                 }
-                if w.download(chart) {
-                    w.wait(delay);
+                if w.download(chart).await {
+                    w.wait(delay).await;
+                } else if k % 500 == 499 {
+                    // (Skipping a long run of charts already downloaded mustn't hold up the web page.)
+                    task::breathe().await;
                 }
             }
+            w.manifest.lock().unwrap().flush();
             w.send_queue();
             let _ = w.tx.send(Msg::JobDone);
         });
@@ -983,7 +1122,9 @@ impl App {
         }
     }
 
-    fn handle_messages(&mut self) {
+    fn handle_messages(&mut self, ctx: &egui::Context) {
+        #[cfg(not(target_arch = "wasm32"))]
+        let _ = ctx;
         while let Ok(msg) = self.rx.try_recv() {
             match msg {
                 Msg::LiveResults(charts) => {
@@ -1052,6 +1193,10 @@ impl App {
                     self.status = Some((s, Instant::now()));
                 }
                 Msg::Log(line) => self.log(line),
+                #[cfg(target_arch = "wasm32")]
+                Msg::FontReady => {
+                    theme::install_fonts(ctx, self.settings.font, &i18n::current());
+                }
                 Msg::OpenLink(id) => {
                     self.log(format!("Opening shared chart {id}"));
                     self.pending_link = Some(id);
@@ -1110,6 +1255,10 @@ impl App {
                 (Tab::Leaderboards, n("🏆  Leaderboards")),
                 (Tab::Settings, n("⚙  Settings")),
             ] {
+                // (The web version needs a proxy for Clone Hero's API; see players::API_URL.)
+                if matches!(tab, Tab::Players | Tab::Leaderboards) && !players::available() {
+                    continue;
+                }
                 let on = self.tab == tab;
                 // Each tab has its own colour: filled when it's open, its label tinted otherwise.
                 let color = match tab {
@@ -2906,11 +3055,14 @@ impl App {
             crate::theme::hrow(ui, |ui| {
                 if downloaded {
                     let good = theme::good();
-                    let button = egui::Button::new(RichText::new(t("📂  Show in folder")).strong().color(good))
+                    // (A web page can't open the file manager, so there it only says it's downloaded.)
+                    let label = if cfg!(target_arch = "wasm32") { t("✔  Downloaded") } else { t("📂  Show in folder") };
+                    let button = egui::Button::new(RichText::new(label).strong().color(good))
                         .fill(good.linear_multiply(0.15))
                         .stroke(egui::Stroke::new(1.0, good.linear_multiply(0.7)))
                         .min_size(vec2(half, 34.0));
-                    reveal_it = ui.add(button).on_hover_text(t("Downloaded ✔  Open it in your file manager")).clicked();
+                    let resp = ui.add(button);
+                    reveal_it = !cfg!(target_arch = "wasm32") && resp.on_hover_text(t("Downloaded ✔  Open it in your file manager")).clicked();
                 } else {
                     download = glossy(ui, download_button(&t("⬇  Download")).min_size(vec2(half, 34.0)), theme::good().lerp_to_gamma(Color32::BLACK, 0.2), !busy).clicked();
                 }
@@ -3321,6 +3473,28 @@ impl App {
         if actions.extract_now {
             self.auto_unzip(true);
         }
+        #[cfg(target_arch = "wasm32")]
+        if actions.pick_folder {
+            self.pick_folder();
+        }
+        #[cfg(target_arch = "wasm32")]
+        if actions.forget_folder {
+            web::forget_folder();
+        }
+    }
+
+    /// The web version's songs folder: asks the browser for one, then reads the download list
+    /// in it (so charts the desktop app downloaded there count as downloaded).
+    #[cfg(target_arch = "wasm32")]
+    fn pick_folder(&mut self) {
+        let (tx, manifest) = (self.tx.clone(), self.manifest.clone());
+        task::spawn(move || async move {
+            let Some(name) = web::pick_folder().await else { return };
+            if let Some(list) = web::folder_read(api::MANIFEST_NAME).await {
+                manifest.lock().unwrap().merge(&String::from_utf8_lossy(&list));
+            }
+            let _ = tx.send(Msg::Log(format!("Saving charts to the folder {name}")));
+        });
     }
 
     /// Saves settings and applies side effects when they change.
@@ -3400,6 +3574,11 @@ struct SettingsActions {
     rebuild: bool,
     extract_now: bool,
     show_shortcuts: bool,
+    /// The web version's Choose… (or Forget) for the songs folder.
+    #[cfg(target_arch = "wasm32")]
+    pick_folder: bool,
+    #[cfg(target_arch = "wasm32")]
+    forget_folder: bool,
 }
 
 /// A full-width settings card with a large title and a short description.
@@ -3480,27 +3659,51 @@ fn segmented<T: PartialEq + Copy>(ui: &mut egui::Ui, value: &mut T, options: &[(
     changed
 }
 
+/// The songs folder's path (or name), in a box under its setting.
+fn folder_box(ui: &mut egui::Ui, text: &str) {
+    egui::Frame::new()
+        .fill(ui.visuals().extreme_bg_color)
+        .corner_radius(CornerRadius::same(8))
+        .inner_margin(egui::Margin::symmetric(10, 8))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.add(egui::Label::new(RichText::new(text).monospace().size(13.5)).truncate());
+        });
+}
+
 fn library_card(ui: &mut egui::Ui, s: &mut Settings, width: f32, busy: bool, example: Option<&Chart>, actions: &mut SettingsActions) {
     let _ = actions;
     settings_card(ui, width, &t("📁  Chart library"), &t("Where Rainbow puts the charts it downloads."), |ui| {
-        setting_row(ui, &t("Songs folder"), &t("Point this at your Clone Hero or YARG songs folder."), |ui| {
-            if ui.add_enabled(!busy, theme::primary(t("Choose…")).min_size(vec2(0.0, 32.0))).clicked()
-                && let Some(dir) = rfd::FileDialog::new().set_directory(&s.dir).pick_folder()
-            {
-                s.dir = dir;
-            }
-            if ui.add(egui::Button::new(RichText::new(t("📂 Open")).size(14.5)).min_size(vec2(0.0, 32.0))).clicked() {
-                open_folder(&s.dir);
-            }
-        });
-        egui::Frame::new()
-            .fill(ui.visuals().extreme_bg_color)
-            .corner_radius(CornerRadius::same(8))
-            .inner_margin(egui::Margin::symmetric(10, 8))
-            .show(ui, |ui| {
-                ui.set_width(ui.available_width());
-                ui.add(egui::Label::new(RichText::new(s.dir.display().to_string()).monospace().size(13.5)).truncate());
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            setting_row(ui, &t("Songs folder"), &t("Point this at your Clone Hero or YARG songs folder."), |ui| {
+                if ui.add_enabled(!busy, theme::primary(t("Choose…")).min_size(vec2(0.0, 32.0))).clicked()
+                    && let Some(dir) = rfd::FileDialog::new().set_directory(&s.dir).pick_folder()
+                {
+                    s.dir = dir;
+                }
+                if ui.add(egui::Button::new(RichText::new(t("📂 Open")).size(14.5)).min_size(vec2(0.0, 32.0))).clicked() {
+                    open_folder(&s.dir);
+                }
             });
+            folder_box(ui, &s.dir.display().to_string());
+        }
+        // The browser can write into a folder only where it has the File System Access API.
+        #[cfg(target_arch = "wasm32")]
+        if web::has_folder_api() {
+            let folder = web::folder_name();
+            setting_row(ui, &t("Songs folder"), &t("Point this at your Clone Hero or YARG songs folder. The browser asks once each visit before Rainbow saves into it."), |ui| {
+                if ui.add_enabled(!busy, theme::primary(t("Choose…")).min_size(vec2(0.0, 32.0))).clicked() {
+                    actions.pick_folder = true;
+                }
+                if folder.is_some() && ui.add_enabled(!busy, egui::Button::new(RichText::new(t("✖ Forget")).size(14.5)).min_size(vec2(0.0, 32.0))).on_hover_text(t("Save charts as ordinary downloads instead")).clicked() {
+                    actions.forget_folder = true;
+                }
+            });
+            folder_box(ui, &folder.unwrap_or_else(|| t("None chosen: charts are saved as ordinary downloads")));
+        } else {
+            setting_row(ui, &t("Songs folder"), &t("This browser saves charts as ordinary downloads (always as .sng files). In Chrome or Edge, Rainbow can save straight into your songs folder."), |_| {});
+        }
         setting_row(ui, &t("Chart folder name"), &t("Use {name} {artist} {album} {genre} {year} {charter}, and / for subfolders."),
             |_| {},
         );
@@ -3539,53 +3742,47 @@ fn downloads_card(ui: &mut egui::Ui, s: &mut Settings, width: f32, busy: bool, a
                     theme::checkbox(ui, &mut s.resume_downloads, "");
                 },
             );
-            setting_row(
-                ui,
-                &t("Convert Rock Band songs automatically"),
-                &t(
-                    "CON files (e.g. from RhythmVerse) in your songs folder become Clone Hero charts. You can also drop them onto the window.",
-                ),
-                |ui| {
-                    theme::checkbox(ui, &mut s.auto_convert, "");
-                },
-            );
-            setting_row(
-                ui,
-                &t("Extract .zip files automatically"),
-                &t("Unpack zips that appear in your songs folder (e.g. from other sites)."),
-                |ui| {
-                    theme::checkbox(ui, &mut s.auto_extract, "");
-                },
-            );
-            ui.add_enabled_ui(s.auto_extract || s.auto_convert, |ui| {
-                let about = tr!(
-                    "Otherwise they're moved to {zips} or {cons} in your songs folder.",
-                    zips = unzip::DONE_DIR,
-                    cons = import::CONVERTED_DIR
-                );
-                setting_row(ui, &t("Delete originals after processing"), &about, |ui| {
-                    theme::checkbox(ui, &mut s.delete_zips, "");
-                });
-            });
+            #[cfg(not(target_arch = "wasm32"))]
+            import_rows(ui, s);
         });
-        setting_row(ui, &t("Wait between bulk downloads"), &t("Encore is donation-funded, so please keep this reasonable."), |ui| {
-            ui.add(egui::Slider::new(&mut s.delay_secs, 0.5..=10.0).suffix(" s"));
-        });
-        setting_row(ui, &t("Convert Rock Band songs automatically"), &t("CON files (e.g. from RhythmVerse) in your songs folder become Clone Hero charts. You can also drop them onto the window."), |ui| {
-            theme::checkbox(ui, &mut s.auto_convert, "");
-        });
-        setting_row(ui, &t("Extract .zip files automatically"), &t("Unpack zips that appear in your songs folder (e.g. from other sites)."), |ui| {
-            theme::checkbox(ui, &mut s.auto_extract, "");
-        });
-        ui.add_enabled_ui(s.auto_extract || s.auto_convert, |ui| {
-            let about = tr!("Otherwise they're moved to {zips} or {cons} in your songs folder.", zips = unzip::DONE_DIR, cons = import::CONVERTED_DIR);
-            setting_row(ui, &t("Delete originals after processing"), &about, |ui| {
-                theme::checkbox(ui, &mut s.delete_zips, "");
-            });
-        });
+        // Importing zips and Rock Band songs is desktop only (it needs to watch the songs folder).
+        #[cfg(not(target_arch = "wasm32"))]
         if ui.add(egui::Button::new(RichText::new(t("📦  Process songs folder now")).size(14.5)).min_size(vec2(0.0, 32.0))).clicked() {
             actions.extract_now = true;
         }
+        #[cfg(target_arch = "wasm32")]
+        let _ = actions;
+    });
+}
+
+/// The Downloads card's settings for importing zips and Rock Band songs (desktop only).
+#[cfg(not(target_arch = "wasm32"))]
+fn import_rows(ui: &mut egui::Ui, s: &mut Settings) {
+    setting_row(
+        ui,
+        &t("Convert Rock Band songs automatically"),
+        &t("CON files (e.g. from RhythmVerse) in your songs folder become Clone Hero charts. You can also drop them onto the window."),
+        |ui| {
+            theme::checkbox(ui, &mut s.auto_convert, "");
+        },
+    );
+    setting_row(
+        ui,
+        &t("Extract .zip files automatically"),
+        &t("Unpack zips that appear in your songs folder (e.g. from other sites)."),
+        |ui| {
+            theme::checkbox(ui, &mut s.auto_extract, "");
+        },
+    );
+    ui.add_enabled_ui(s.auto_extract || s.auto_convert, |ui| {
+        let about = tr!(
+            "Otherwise they're moved to {zips} or {cons} in your songs folder.",
+            zips = unzip::DONE_DIR,
+            cons = import::CONVERTED_DIR
+        );
+        setting_row(ui, &t("Delete originals after processing"), &about, |ui| {
+            theme::checkbox(ui, &mut s.delete_zips, "");
+        });
     });
 }
 
@@ -4101,6 +4298,8 @@ fn row_context_menu(ui: &mut egui::Ui, c: &Chart, i: usize, checked: bool, downl
     };
     pick(ui, "info", &t("ℹ  Show details"), RowAction::Details(i));
     if downloaded {
+        // (A web page can't open the file manager.)
+        #[cfg(not(target_arch = "wasm32"))]
         pick(ui, "folder", &t("📂  Show in folder"), RowAction::Reveal(i));
     } else {
         pick(ui, "download", &t("⬇  Download"), RowAction::Download(i));
@@ -4185,6 +4384,8 @@ fn text_menu(resp: &egui::Response, text: &mut String) -> bool {
             ctx.copy_text(text[bs..be].to_owned());
             ui.close();
         }
+        // (In the browser, pasting is Ctrl+V: pages can't read the clipboard on their own.)
+        #[cfg(not(target_arch = "wasm32"))]
         if ui.button(t("📥  Paste")).clicked() {
             if let Ok(clip) = arboard::Clipboard::new().and_then(|mut c| c.get_text()) {
                 let clip = clip.replace(['\r', '\n'], " ");
@@ -4618,7 +4819,7 @@ impl eframe::App for App {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        self.handle_messages();
+        self.handle_messages(ui.ctx());
         self.covers.poll();
         self.auto_unzip(false);
         let ctx = ui.ctx().clone();
@@ -4830,10 +5031,10 @@ impl Worker {
     }
 
     /// Sleeps, but wakes early if Stop is pressed.
-    fn wait(&self, d: Duration) {
+    async fn wait(&self, d: Duration) {
         let end = Instant::now() + d;
         while !self.stopped() && Instant::now() < end {
-            thread::sleep(Duration::from_millis(100).min(end - Instant::now()));
+            task::sleep(Duration::from_millis(100).min(end - Instant::now())).await;
         }
     }
 
@@ -4842,7 +5043,7 @@ impl Worker {
     }
 
     /// Downloads one chart unless it's already in the manifest. Returns true if it hit the network.
-    fn download(&mut self, chart: &Chart) -> bool {
+    async fn download(&mut self, chart: &Chart) -> bool {
         self.checked += 1;
         if self.manifest.lock().unwrap().contains(&chart.md5) {
             // Skips are fast; don't flood the UI with a message for each one.
@@ -4853,12 +5054,22 @@ impl Worker {
         }
         let title = chart.title();
         let tx = self.tx.clone();
-        let result = self.client.download(chart, &self.settings, |done, total| {
-            let _ = tx.send(Msg::FileProgress { title: title.clone(), done, total });
-        });
+        let result = self
+            .client
+            .download(chart, &self.settings, |done, total| {
+                let _ = tx.send(Msg::FileProgress { title: title.clone(), done, total });
+            })
+            .await;
         let line = match result {
             Ok(path) => {
                 self.downloaded += 1;
+                // The web version also adds it to the songs folder's own download list (which
+                // the desktop app reads).
+                #[cfg(target_arch = "wasm32")]
+                if crate::web::folder_name().is_some() && crate::web::folder_allowed().await {
+                    let line = Manifest::line(chart, &path);
+                    let _ = crate::web::folder_write(api::MANIFEST_NAME, line.as_bytes(), true).await;
+                }
                 match self.manifest.lock().unwrap().add(chart, &path) {
                     Ok(()) => format!("Downloaded {title}"),
                     Err(e) => format!("Downloaded {title}, but couldn't update download list: {e:#}"),

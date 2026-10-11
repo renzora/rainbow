@@ -27,6 +27,19 @@ cargo test --release       # the quick tests
 On Linux you also need the usual windowing libraries; see the `Install system libraries`
 step in `.github/workflows/build.yml` for the exact packages.
 
+The web version is the same code built for `wasm32-unknown-unknown`: `sh tools/build_web.sh`
+builds it into `dist/` (see the README). Check both builds when you change anything that
+touches the network, files or threads:
+
+```sh
+cargo check && cargo check --target wasm32-unknown-unknown
+```
+
+Background work goes through `task::spawn` (a thread on the desktop, the page's event loop on
+the web), HTTP through `net`, and Rainbow's own files through `store`, so the same code runs on
+both. Code that only makes sense on one is marked `#[cfg(target_arch = "wasm32")]` or
+`#[cfg(not(target_arch = "wasm32"))]`.
+
 ## Where things are
 
 | File | What it does |
@@ -38,8 +51,11 @@ step in `.github/workflows/build.yml` for the exact packages.
 | `src/optimal.rs`, `src/drums.rs` | Optimal score: Clone Hero scoring and the star power path search (drums have their own rules) |
 | `src/players.rs`, `src/leaderboard.rs`, `src/trackhash/` | Clone Hero players, profiles and leaderboards |
 | `src/rockband.rs`, `src/stfs.rs`, `src/dta.rs` | Converting Rock Band songs |
-| `src/updater.rs` | Updating from GitHub releases |
+| `src/updater.rs` | Updating from GitHub releases (`src/updater_web.rs` stands in for it on the web) |
 | `src/links.rs`, `docs/c/` | `rainbow://` chart links, and the web page shared links open |
+| `src/task.rs`, `src/net.rs`, `src/store.rs` | Background work, HTTP and Rainbow's own files, for both the desktop and the web |
+| `src/web.rs`, `web/`, `tools/build_web.sh` | The web version: the page, its link to the browser (storage, songs folder, downloads), and building it |
+| `tools/clonehero-proxy/` | The Cloudflare Worker the web version reaches Clone Hero's leaderboards through |
 | `src/theme.rs`, `src/i18n.rs`, `src/flags.rs`, `src/datepicker.rs` | Look and feel, translations (and right-to-left text), language flags |
 | `assets/lang/` | One file per language |
 

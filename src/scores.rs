@@ -5,8 +5,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering::Relaxed};
 use std::sync::mpsc::{Receiver, channel};
-use std::thread;
-use std::time::{Duration, Instant};
+use web_time::{Duration, Instant};
 
 use eframe::egui;
 use egui::{Color32, RichText};
@@ -148,23 +147,26 @@ impl Scores {
         let (client, chart, ctx) = (self.client.clone(), chart.clone(), ctx.clone());
         let progress = Arc::new(AtomicU32::new(0));
         let shared = progress.clone();
-        thread::spawn(move || {
+        crate::task::spawn(move || async move {
             // The first fifth of the bar is the download, the rest each part in turn.
             let download = AtomicU32::new(0);
-            let result = preview::load(&client, &chart, &download)
-                .map_err(|e| format!("{e:#}"))
-                .map(|loaded| {
+            let result = match preview::load(&client, &chart, &download).await {
+                Ok(loaded) => {
                     let count = parts.len().max(1) as f32;
-                    parts
-                        .iter()
-                        .enumerate()
-                        .filter_map(|(k, &i)| {
-                            let report = |f: f32| shared.store((200.0 + 800.0 * (k as f32 + f) / count) as u32, Relaxed);
-                            report(0.0);
-                            optimal::optimise_cached(&chart.md5, &loaded.chart, i, diff, loaded.sustain_cutoff, &report).map(|o| (i, o))
-                        })
-                        .collect()
-                });
+                    let mut found = Vec::new();
+                    for (k, &i) in parts.iter().enumerate() {
+                        let report = |f: f32| shared.store((200.0 + 800.0 * (k as f32 + f) / count) as u32, Relaxed);
+                        report(0.0);
+                        // (On the web, lets the bar move between parts.)
+                        crate::task::breathe().await;
+                        if let Some(o) = optimal::optimise_cached(&chart.md5, &loaded.chart, i, diff, loaded.sustain_cutoff, &report) {
+                            found.push((i, o));
+                        }
+                    }
+                    Ok(found.into_iter().collect())
+                }
+                Err(e) => Err(format!("{e:#}")),
+            };
             let _ = tx.send(result);
             ctx.request_repaint();
         });

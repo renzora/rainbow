@@ -1,6 +1,5 @@
 //! User settings, saved as JSON next to the catalogue.
 
-use std::fs;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -156,14 +155,12 @@ impl Settings {
     }
 
     pub fn load() -> Self {
-        fs::read(path()).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
+        crate::store::read(&path()).and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
     }
 
     pub fn save(&self) {
-        let path = path();
-        let _ = fs::create_dir_all(path.parent().unwrap());
         if let Ok(json) = serde_json::to_vec_pretty(self) {
-            let _ = fs::write(path, json);
+            let _ = crate::store::write(&path(), &json);
         }
     }
 }

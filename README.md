@@ -6,6 +6,9 @@ A fast desktop app for searching and downloading Clone Hero / YARG charts from
 [Chorus Encore](https://www.enchor.us). It's a lightweight alternative to
 [Bridge](https://github.com/Geomitron/Bridge), written in Rust.
 
+It also runs in your browser, nothing to install: **<https://renzora.github.io/rainbow/>**
+(see [The web version](#the-web-version)).
+
 ![Rainbow's search window, listing charts with their artist, album, genre, year, charter, length, difficulty and tags](assets/preview.png)
 
 ## Features
@@ -53,6 +56,34 @@ cargo build --release
 # target/release/rainbow(.exe)
 ```
 
+## The web version
+
+The same app, compiled to WebAssembly, at <https://renzora.github.io/rainbow/>. It has
+everything the desktop app has except updating itself, `rainbow://` links, and importing zips
+and Rock Band songs. Differences:
+
+- **Downloads:** in Chrome and Edge you choose your songs folder once (Settings → Chart library)
+  and charts are saved straight into it; the browser asks for permission once per visit. Other
+  browsers save each chart as an ordinary download (a `.sng` file).
+- **Catalogue:** a copy of Encore's whole chart list is published with the page and refreshed
+  daily, so it's ready in seconds; Rainbow then fetches anything newer from Encore.
+- **Clone Hero leaderboards** need a small proxy, because Clone Hero's API only answers its own
+  website; see [`tools/clonehero-proxy`](tools/clonehero-proxy). Without it, the Players and
+  Leaderboards tabs are left out.
+- Settings, the catalogue and caches are kept in the browser's storage for the site.
+
+To build it yourself you need the `wasm32-unknown-unknown` target and `wasm-bindgen-cli` (at
+the same version as the `wasm-bindgen` crate in `Cargo.lock`):
+
+```sh
+rustup target add wasm32-unknown-unknown
+sh tools/build_web.sh                 # builds dist/
+python -m http.server 8765 -d dist    # then open http://localhost:8765
+```
+
+`.github/workflows/web.yml` builds it and publishes it to GitHub Pages on every push to `main`
+(and daily, for the catalogue). The repository's Pages source must be set to **GitHub Actions**.
+
 ## Translations
 
 Rainbow follows your system language and has a language picker in the status bar. It ships
@@ -92,7 +123,7 @@ place, and album covers in the system's cache folder:
 | Linux | `~/.local/share/rainbow` (`$XDG_DATA_HOME`) | `~/.cache/rainbow/covers` (`$XDG_CACHE_HOME`) |
 
 Each songs folder also gets a `.rainbow-downloaded.txt` list, so re-runs skip charts you
-already have.
+already have. (The web version reads and adds to it too.)
 
 ## Be nice to Encore
 

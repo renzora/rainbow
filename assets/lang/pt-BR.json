@@ -593,6 +593,12 @@
     "🌈  Show all songs": "🌈  Mostrar todas as músicas",
     "This chart isn't on Chorus Encore": "Este chart não está no Chorus Encore",
     "{song} isn't on Chorus Encore, so it can't be downloaded here": "{song} não está no Chorus Encore, então não dá para baixar aqui",
-    "🔍  Search the web": "🔍  Pesquisar na web"
+    "🔍  Search the web": "🔍  Pesquisar na web",
+    "✔  Downloaded": "✔  Baixado",
+    "✖ Forget": "✖ Esquecer",
+    "Save charts as ordinary downloads instead": "Salvar os charts como downloads comuns",
+    "None chosen: charts are saved as ordinary downloads": "Nenhuma escolhida: os charts são salvos como downloads comuns",
+    "Point this at your Clone Hero or YARG songs folder. The browser asks once each visit before Rainbow saves into it.": "Aponte para sua pasta de músicas do Clone Hero ou YARG. O navegador pergunta uma vez a cada visita antes de o Rainbow salvar nela.",
+    "This browser saves charts as ordinary downloads (always as .sng files). In Chrome or Edge, Rainbow can save straight into your songs folder.": "Este navegador salva os charts como downloads comuns (sempre como arquivos .sng). No Chrome ou Edge, o Rainbow pode salvar direto na sua pasta de músicas."
   }
 }

@@ -593,6 +593,12 @@
     "🌈  Show all songs": "🌈  Показати всі пісні",
     "This chart isn't on Chorus Encore": "Цього чарту немає на Chorus Encore",
     "{song} isn't on Chorus Encore, so it can't be downloaded here": "{song} немає на Chorus Encore, тож завантажити його тут не можна",
-    "🔍  Search the web": "🔍  Шукати в інтернеті"
+    "🔍  Search the web": "🔍  Шукати в інтернеті",
+    "✔  Downloaded": "✔  Завантажено",
+    "✖ Forget": "✖ Забути",
+    "Save charts as ordinary downloads instead": "Зберігати чарти як звичайні завантаження",
+    "None chosen: charts are saved as ordinary downloads": "Не вибрано: чарти зберігаються як звичайні завантаження",
+    "Point this at your Clone Hero or YARG songs folder. The browser asks once each visit before Rainbow saves into it.": "Вкажіть папку пісень Clone Hero або YARG. Браузер питає один раз за відвідування, перш ніж Rainbow збереже в неї.",
+    "This browser saves charts as ordinary downloads (always as .sng files). In Chrome or Edge, Rainbow can save straight into your songs folder.": "Цей браузер зберігає чарти як звичайні завантаження (завжди файлами .sng). У Chrome чи Edge Rainbow може зберігати просто в папку пісень."
   }
 }

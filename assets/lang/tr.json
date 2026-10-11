@@ -593,6 +593,12 @@
     "🌈  Show all songs": "🌈  Tüm şarkıları göster",
     "This chart isn't on Chorus Encore": "Bu chart Chorus Encore'da yok",
     "{song} isn't on Chorus Encore, so it can't be downloaded here": "{song} Chorus Encore'da yok, bu yüzden buradan indirilemez",
-    "🔍  Search the web": "🔍  Web'de ara"
+    "🔍  Search the web": "🔍  Web'de ara",
+    "✔  Downloaded": "✔  İndirildi",
+    "✖ Forget": "✖ Unut",
+    "Save charts as ordinary downloads instead": "Chart'ları bunun yerine normal indirmeler olarak kaydet",
+    "None chosen: charts are saved as ordinary downloads": "Seçilmedi: chart'lar normal indirmeler olarak kaydedilir",
+    "Point this at your Clone Hero or YARG songs folder. The browser asks once each visit before Rainbow saves into it.": "Clone Hero veya YARG şarkı klasörünü seç. Rainbow kaydetmeden önce tarayıcı her ziyarette bir kez sorar.",
+    "This browser saves charts as ordinary downloads (always as .sng files). In Chrome or Edge, Rainbow can save straight into your songs folder.": "Bu tarayıcı chart'ları normal indirmeler olarak kaydeder (her zaman .sng dosyası olarak). Chrome veya Edge'de Rainbow doğrudan şarkı klasörüne kaydedebilir."
   }
 }

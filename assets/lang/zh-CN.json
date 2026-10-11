@@ -593,6 +593,12 @@
     "🌈  Show all songs": "🌈  显示所有歌曲",
     "This chart isn't on Chorus Encore": "Chorus Encore 上没有这个谱面",
     "{song} isn't on Chorus Encore, so it can't be downloaded here": "Chorus Encore 上没有 {song}，所以无法在这里下载",
-    "🔍  Search the web": "🔍  在网上搜索"
+    "🔍  Search the web": "🔍  在网上搜索",
+    "✔  Downloaded": "✔  已下载",
+    "✖ Forget": "✖ 取消",
+    "Save charts as ordinary downloads instead": "改为以普通下载保存谱面",
+    "None chosen: charts are saved as ordinary downloads": "未选择：谱面以普通下载保存",
+    "Point this at your Clone Hero or YARG songs folder. The browser asks once each visit before Rainbow saves into it.": "指向你的 Clone Hero 或 YARG 歌曲文件夹。每次访问时，浏览器会在 Rainbow 保存前询问一次。",
+    "This browser saves charts as ordinary downloads (always as .sng files). In Chrome or Edge, Rainbow can save straight into your songs folder.": "此浏览器以普通下载保存谱面（始终为 .sng 文件）。在 Chrome 或 Edge 中，Rainbow 可直接保存到歌曲文件夹。"
   }
 }

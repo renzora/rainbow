@@ -7,24 +7,34 @@
 //!   GET /v1/scores?songHash=..&accountId=.. -> a player's placement on a song
 
 use std::collections::HashMap;
-use std::sync::mpsc::{Receiver, channel};
-use std::thread;
-use std::time::{Duration, Instant};
+use web_time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use eframe::egui;
 use egui::{Color32, CornerRadius, RichText, Sense, pos2, vec2};
-use reqwest::blocking::Client;
 use serde_json::Value;
 
 use crate::api::strip_tags;
+use crate::net::Http as Client;
+use crate::task::Load;
 use crate::i18n::t;
 use crate::n;
 use crate::settings::Density;
 use crate::preview::thousands;
 use crate::{theme, tr};
 
-const API_URL: &str = "https://api.clonehero.net/v1";
+/// Clone Hero's leaderboard API. It only answers its own website's pages, so the web version
+/// goes through a small proxy (tools/clonehero-proxy), given when it's built; without one the
+/// web version can't show the leaderboards.
+#[cfg(not(target_arch = "wasm32"))]
+const API_URL: Option<&str> = Some("https://api.clonehero.net/v1");
+#[cfg(target_arch = "wasm32")]
+const API_URL: Option<&str> = option_env!("RAINBOW_CH_PROXY");
+
+/// Whether the leaderboards can be reached (always on the desktop).
+pub fn available() -> bool {
+    API_URL.is_some_and(|u| !u.is_empty())
+}
 const SITE_URL: &str = "https://leaderboards.clonehero.net";
 /// Wait this long after typing stops before searching for players.
 const SEARCH_DELAY: Duration = Duration::from_millis(600);
@@ -81,48 +91,15 @@ fn series(k: usize) -> Color32 {
 
 // ─────────────────────────────── Loading ───────────────────────────────
 
-enum Load<T> {
-    Loading(Receiver<Result<T, String>>),
-    Ready(T),
-    Failed(String),
-}
-
-impl<T: Send + 'static> Load<T> {
-    fn start(ctx: &egui::Context, work: impl FnOnce() -> Result<T> + Send + 'static) -> Self {
-        let (tx, rx) = channel();
-        let ctx = ctx.clone();
-        thread::spawn(move || {
-            let _ = tx.send(work().map_err(|e| format!("{e:#}")));
-            ctx.request_repaint();
-        });
-        Load::Loading(rx)
-    }
-
-    fn poll(&mut self) -> &mut Self {
-        if let Load::Loading(rx) = self
-            && let Ok(result) = rx.try_recv()
-        {
-            *self = match result {
-                Ok(v) => Load::Ready(v),
-                Err(e) => Load::Failed(e),
-            };
-        }
-        self
-    }
-
-    fn ready(&mut self) -> Option<&T> {
-        match self.poll() {
-            Load::Ready(v) => Some(v),
-            _ => None,
-        }
-    }
-}
-
-fn get(http: &Client, path: &str, query: &[(&str, String)]) -> Result<Value> {
+async fn get(http: &Client, path: &str, query: &[(&str, String)]) -> Result<Value> {
     let query: Vec<String> = query.iter().map(|(k, v)| format!("{k}={}", encode(v))).collect();
-    let url = if query.is_empty() { format!("{API_URL}{path}") } else { format!("{API_URL}{path}?{}", query.join("&")) };
-    let resp = http.get(url).send()?.error_for_status()?;
-    Ok(resp.json()?)
+    get_url(http, &if query.is_empty() { path.to_owned() } else { format!("{path}?{}", query.join("&")) }).await
+}
+
+/// GETs `path` (with its query) from the leaderboard API.
+pub(crate) async fn get_url(http: &Client, path: &str) -> Result<Value> {
+    let base = API_URL.filter(|u| !u.is_empty()).context("Clone Hero's leaderboards can't be reached from the web version yet")?;
+    Ok(http.get(&format!("{base}{path}")).send().await?.error_for_status()?.json().await?)
 }
 
 /// Percent-encodes a query value.
@@ -151,8 +128,8 @@ struct Found {
     name: String,
 }
 
-fn search_players(http: &Client, query: &str) -> Result<Vec<Found>> {
-    let v = get(http, "/search", &[("q", query.to_owned()), ("songsPage", "1".into()), ("usersPage", "1".into()), ("perPage", "8".into())])?;
+async fn search_players(http: &Client, query: &str) -> Result<Vec<Found>> {
+    let v = get(http, "/search", &[("q", query.to_owned()), ("songsPage", "1".into()), ("usersPage", "1".into()), ("perPage", "8".into())]).await?;
     Ok(v["users"]
         .as_array()
         .into_iter()
@@ -216,9 +193,9 @@ const MAX_COMPARE: usize = 5;
 
 const PARTS: [&str; 6] = [n("Notes"), n("Sustains"), n("Solos"), n("Combo"), n("Star power"), n("Other")];
 
-fn fetch_profile(http: &Client, id: u64) -> Result<Profile> {
-    let v = get(http, &format!("/account/{id}/profile"), &[])?;
-    let players = get(http, "/stats/site-totals", &[]).map(|t| num(&t["users"])).unwrap_or(0);
+async fn fetch_profile(http: &Client, id: u64) -> Result<Profile> {
+    let v = get(http, &format!("/account/{id}/profile"), &[]).await?;
+    let players = get(http, "/stats/site-totals", &[]).await.map(|t| num(&t["users"])).unwrap_or(0);
     let (s, r) = (&v["stats"], &v["ranks"]);
     let rank = |k: &str| Some(num(&r[k])).filter(|&n| n > 0);
     let hours = num(&s["totalTimePlayedMs"]) / 3_600_000;
@@ -286,14 +263,17 @@ fn fetch_profile(http: &Client, id: u64) -> Result<Profile> {
             .collect(),
         latest,
         players,
-        avatar: v["profilePictureUrl"].as_str().and_then(|url| fetch_picture(http, url).ok()),
+        avatar: match v["profilePictureUrl"].as_str() {
+            Some(url) => fetch_picture(http, url).await.ok(),
+            None => None,
+        },
         avatar_color: default_avatar_color(&text(&v["avatarSourceKey"])),
     })
 }
 
 /// Downloads a profile picture, shrunk to avatar size.
-fn fetch_picture(http: &Client, url: &str) -> Result<egui::ColorImage> {
-    let bytes = http.get(url).send()?.error_for_status()?.bytes()?;
+async fn fetch_picture(http: &Client, url: &str) -> Result<egui::ColorImage> {
+    let bytes = http.get(url).send().await?.error_for_status()?.bytes().await?;
     let img = image::load_from_memory(&bytes)?.resize_to_fill(128, 128, image::imageops::FilterType::Triangle).to_rgba8();
     Ok(egui::ColorImage::from_rgba_unmultiplied([img.width() as usize, img.height() as usize], img.as_raw()))
 }
@@ -312,7 +292,7 @@ fn default_avatar_color(key: &str) -> Color32 {
     }
 }
 /// A player's placement on one song's leaderboard, and how many players it has.
-fn fetch_placement(http: &Client, id: u64, s: &Score) -> Result<(u64, u64)> {
+async fn fetch_placement(http: &Client, id: u64, s: &Score) -> Result<(u64, u64)> {
     let v = get(
         http,
         "/scores",
@@ -325,7 +305,7 @@ fn fetch_placement(http: &Client, id: u64, s: &Score) -> Result<(u64, u64)> {
             ("nearHigher", "0".into()),
             ("nearLower", "0".into()),
         ],
-    )?;
+    ).await?;
     let mine = v["near"]["scoreData"].as_array().into_iter().flatten().chain(v["top"]["scoreData"].as_array().into_iter().flatten()).find(|e| num(&e["accountId"]) == id);
     let placement = mine.map(|e| num(&e["placement"])).context("not on this leaderboard")?;
     Ok((placement, num(&v["summary"]["totalPlayerCount"])))
@@ -391,21 +371,21 @@ struct Recent {
 
 struct Totals(Vec<(&'static str, u64)>);
 
-fn fetch_ranked(http: &Client, metric: &str) -> Result<Vec<Ranked>> {
-    let v = get(http, "/stats/player-leaderboard", &[("metric", metric.to_owned())])?;
+async fn fetch_ranked(http: &Client, metric: &str) -> Result<Vec<Ranked>> {
+    let v = get(http, "/stats/player-leaderboard", &[("metric", metric.to_owned())]).await?;
     Ok(v.as_array().into_iter().flatten().map(|e| Ranked { id: num(&e["accountId"]), name: text(&e["username"]), value: num(&e["value"]) }).collect())
 }
 
-fn fetch_popular(http: &Client, period: &str) -> Result<Vec<Popular>> {
-    let v = get(http, "/stats/song-leaderboard", &[("tab", period.to_owned())])?;
+async fn fetch_popular(http: &Client, period: &str) -> Result<Vec<Popular>> {
+    let v = get(http, "/stats/song-leaderboard", &[("tab", period.to_owned())]).await?;
     let mut out: Vec<Popular> =
         v.as_array().into_iter().flatten().map(|e| Popular { name: text(&e["name"]), artist: text(&e["artist"]), plays: num(&e["plays"]) }).collect();
     out.sort_by(|a, b| b.plays.cmp(&a.plays));
     Ok(out)
 }
 
-fn fetch_recent(http: &Client) -> Result<Vec<Recent>> {
-    let v = get(http, "/scores/latest-scores", &[])?;
+async fn fetch_recent(http: &Client) -> Result<Vec<Recent>> {
+    let v = get(http, "/scores/latest-scores", &[]).await?;
     Ok(v.as_array()
         .into_iter()
         .flatten()
@@ -427,8 +407,8 @@ fn fetch_recent(http: &Client) -> Result<Vec<Recent>> {
         .collect())
 }
 
-fn fetch_totals(http: &Client) -> Result<Totals> {
-    let v = get(http, "/stats/site-totals", &[])?;
+async fn fetch_totals(http: &Client) -> Result<Totals> {
+    let v = get(http, "/stats/site-totals", &[]).await?;
     Ok(Totals(vec![
         (n("Players"), num(&v["users"])),
         (n("Scores submitted"), num(&v["submissions"])),
@@ -480,12 +460,12 @@ pub type Played = Option<(String, Vec<(String, String, String)>)>;
 
 /// Looks a player up by name and lists the charts on their profile: the latest scores and most
 /// played songs (the leaderboards don't share more than that).
-fn fetch_played(http: &Client, name: &str) -> Result<Played> {
-    let found = search_players(http, name)?;
+async fn fetch_played(http: &Client, name: &str) -> Result<Played> {
+    let found = search_players(http, name).await?;
     let Some(f) = found.iter().find(|f| f.name.eq_ignore_ascii_case(name)).or(found.first()) else {
         return Ok(None);
     };
-    let v = get(http, &format!("/account/{}/profile", f.id), &[])?;
+    let v = get(http, &format!("/account/{}/profile", f.id), &[]).await?;
     let lower = |e: &Value, k: &str| text(&e[k]).to_lowercase();
     let mut charts: Vec<(String, String, String)> = ["latestSubmissions", "mostPlayed", "topSubmissions"]
         .iter()
@@ -612,7 +592,7 @@ impl Finder {
                 return None;
             }
             let (http, q) = (http.clone(), query.clone());
-            self.found = Some((query.clone(), Load::start(ui.ctx(), move || search_players(&http, &q))));
+            self.found = Some((query.clone(), Load::start(ui.ctx(), move || async move { search_players(&http, &q).await })));
         }
         let (_, load) = self.found.as_mut()?;
         let mut pick = None;
@@ -661,12 +641,7 @@ impl Finder {
 
 impl Players {
     pub fn new() -> Self {
-        let http = Client::builder()
-            .user_agent(concat!("rainbow/", env!("CARGO_PKG_VERSION")))
-            .connect_timeout(Duration::from_secs(20))
-            .timeout(Duration::from_secs(40))
-            .build()
-            .unwrap_or_default();
+        let http = Client::new(Some(Duration::from_secs(40)));
         Self {
             http,
             art: Art::default(),
@@ -706,7 +681,7 @@ impl Players {
 
     fn show_profile(&mut self, ctx: &egui::Context, id: u64, name: String) {
         let http = self.http.clone();
-        self.window = Some(Window { id, name, profile: Load::start(ctx, move || fetch_profile(&http, id)), placements: Vec::new(), avatar: None });
+        self.window = Some(Window { id, name, profile: Load::start(ctx, move || async move { fetch_profile(&http, id).await }), placements: Vec::new(), avatar: None });
         // Nobody is compared with themselves.
         self.others.retain(|o| o.id != id);
     }
@@ -716,7 +691,7 @@ impl Players {
             return;
         }
         let http = self.http.clone();
-        self.others.push(Other { id, name, profile: Load::start(ctx, move || fetch_profile(&http, id)), avatar: None });
+        self.others.push(Other { id, name, profile: Load::start(ctx, move || async move { fetch_profile(&http, id).await }), avatar: None });
     }
 
     /// Whether a profile was opened since the last call (so the app can show the Players tab).
@@ -730,7 +705,7 @@ impl Players {
         let k = PERIODS.iter().position(|p| p.0 == "topAllTime")?;
         let load = self.popular[k].get_or_insert_with(|| {
             let http = self.http.clone();
-            Load::start(ctx, move || fetch_popular(&http, "topAllTime"))
+            Load::start(ctx, move || async move { fetch_popular(&http, "topAllTime").await })
         });
         load.ready().map(|songs| songs.iter().map(|s| (s.name.to_lowercase(), s.artist.to_lowercase())).collect())
     }
@@ -741,7 +716,7 @@ impl Players {
         let key = name.trim().to_lowercase();
         let load = self.played.entry(key.clone()).or_insert_with(|| {
             let http = self.http.clone();
-            Load::start(ctx, move || fetch_played(&http, &key))
+            Load::start(ctx, move || async move { fetch_played(&http, &key).await })
         });
         match load.poll() {
             Load::Loading(_) => None,
@@ -818,7 +793,7 @@ impl Players {
                     let http = self.http.clone();
                     let load = self.ranked[metric].get_or_insert_with(|| {
                         let m = METRICS[metric].0;
-                        Load::start(&ctx, move || fetch_ranked(&http, m))
+                        Load::start(&ctx, move || async move { fetch_ranked(&http, m).await })
                     });
                     let current = self.window.as_ref().map(|w| w.id);
                     show_load(ui, load, |ui, rows: &Vec<Ranked>| {
@@ -895,7 +870,7 @@ impl Players {
             ui.add_space(8.0);
             let totals = self.totals.get_or_insert_with(|| {
                 let http = http.clone();
-                Load::start(&ctx, move || fetch_totals(&http))
+                Load::start(&ctx, move || async move { fetch_totals(&http).await })
             });
             if let Some(Totals(list)) = totals.ready() {
                 let stats: Vec<Stat> = list.iter().enumerate().map(|(k, (label, value))| Stat { icon: TOTAL_ICONS[k], label, value: *value, shown: thousands(*value), rank: None }).collect();
@@ -913,7 +888,7 @@ impl Players {
                         let load = me.ranked[metric].get_or_insert_with(|| {
                             let http = http.clone();
                             let m = METRICS[metric].0;
-                            Load::start(&ctx, move || fetch_ranked(&http, m))
+                            Load::start(&ctx, move || async move { fetch_ranked(&http, m).await })
                         });
                         show_load(ui, load, |ui, rows: &Vec<Ranked>| {
                             let max = rows.iter().map(|r| r.value).max().unwrap_or(1).max(1);
@@ -944,7 +919,7 @@ impl Players {
                         let load = me.popular[period].get_or_insert_with(|| {
                             let http = http.clone();
                             let p = PERIODS[period].0;
-                            Load::start(&ctx, move || fetch_popular(&http, p))
+                            Load::start(&ctx, move || async move { fetch_popular(&http, p).await })
                         });
                         show_load(ui, load, |ui, rows: &Vec<Popular>| {
                             let max = rows.iter().map(|r| r.plays).max().unwrap_or(1).max(1);
@@ -1009,7 +984,7 @@ impl Players {
                     let reload = crate::section_ex(ui, "lb_latest", &t("🕒  Latest scores"), Some(&t("The newest scores submitted to Clone Hero; click one to see the player")), Some(&refresh), |ui| {
                         let load = me.recent.get_or_insert_with(|| {
                             let http = http.clone();
-                            Load::start(&ctx, move || fetch_recent(&http))
+                            Load::start(&ctx, move || async move { fetch_recent(&http).await })
                         });
                         show_load(ui, load, |ui, rows: &Vec<Recent>| {
                             for (k, r) in rows.iter().take(50).enumerate() {
@@ -1132,7 +1107,7 @@ fn profile_view(ui: &mut egui::Ui, http: &Client, w: &mut Window, others: &mut [
                 .iter()
                 .map(|s| {
                     let (http, id, s) = (http.clone(), p.id, s.clone());
-                    Some(Load::start(ui.ctx(), move || fetch_placement(&http, id, &s)))
+                    Some(Load::start(ui.ctx(), move || async move { fetch_placement(&http, id, &s).await }))
                 })
                 .collect();
         }
@@ -1268,14 +1243,18 @@ pub fn small_avatar(ui: &mut egui::Ui, id: u64, name: &str, size: f32) {
     let mut avatars = AVATARS.lock().unwrap();
     let entry = avatars.entry(id).or_insert_with(|| {
         let ctx = ui.ctx().clone();
-        thread::spawn(move || {
-            let http = Client::builder().timeout(Duration::from_secs(30)).build().unwrap_or_default();
-            let found = get(&http, &format!("/account/{id}/profile"), &[]).ok().map(|v| {
-                match v["profilePictureUrl"].as_str().and_then(|url| fetch_picture(&http, url).ok()) {
-                    Some(img) => Avatar::Picture(Some(img), None),
+        crate::task::spawn(move || async move {
+            let http = Client::new(Some(Duration::from_secs(30)));
+            let found = match get(&http, &format!("/account/{id}/profile"), &[]).await {
+                Ok(v) => Some(match v["profilePictureUrl"].as_str() {
+                    Some(url) => match fetch_picture(&http, url).await {
+                        Ok(img) => Avatar::Picture(Some(img), None),
+                        Err(_) => Avatar::Colour(default_avatar_color(&text(&v["avatarSourceKey"]))),
+                    },
                     None => Avatar::Colour(default_avatar_color(&text(&v["avatarSourceKey"]))),
-                }
-            });
+                }),
+                Err(_) => None,
+            };
             AVATARS.lock().unwrap().insert(id, found.unwrap_or(Avatar::Colour(default_avatar_color(""))));
             ctx.request_repaint();
         });

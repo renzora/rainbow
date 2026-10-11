@@ -5,8 +5,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU32;
 use std::sync::mpsc::{Receiver, channel};
-use std::thread;
-use std::time::Instant;
+use web_time::Instant;
 
 use anyhow::bail;
 use eframe::egui;
@@ -49,6 +48,7 @@ enum State {
 }
 
 /// Saving the path chart: in progress, or done (the path saved to, or an error).
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 enum SaveStatus {
     Saving(Receiver<Result<String, String>>),
     Done(Result<String, String>),
@@ -108,9 +108,9 @@ impl Preview {
         let (client, chart, ctx) = (client.clone(), c.clone(), ctx.clone());
         let progress = Arc::new(AtomicU32::new(0));
         let load_progress = progress.clone();
-        thread::spawn(move || {
+        crate::task::spawn(move || async move {
             let progress = load_progress;
-            let _ = tx.send(load(&client, &chart, &progress).map_err(|e| format!("{e:#}")));
+            let _ = tx.send(load(&client, &chart, &progress).await.map_err(|e| format!("{e:#}")));
             ctx.request_repaint();
         });
         let inst = inst.filter(|&i| c.diffs[i as usize] >= 0).or_else(|| (0..10).find(|&i| c.diffs[i as usize] >= 0)).unwrap_or(0);
@@ -157,7 +157,9 @@ impl Preview {
             let (ctx, md5) = (ctx.clone(), self.md5.clone());
             let progress = Arc::new(AtomicU32::new(0));
             let shared = progress.clone();
-            thread::spawn(move || {
+            crate::task::spawn(move || async move {
+                // On the web this runs between frames; let the bar show before the work starts.
+                crate::task::breathe().await;
                 let report = |f: f32| shared.store((f * 1000.0) as u32, std::sync::atomic::Ordering::Relaxed);
                 let _ = tx.send(optimal::optimise_cached(&md5, &chart, key.0, key.1, cutoff, &report));
                 ctx.request_repaint();
@@ -242,7 +244,7 @@ impl Preview {
                     ui.label(t("Downloading the chart…"));
                     let done = self.load_progress.load(std::sync::atomic::Ordering::Relaxed) as f32 / 1000.0;
                     ui.add(crate::theme::Bar::new(done).desired_width(240.0).show_percentage().fill(crate::theme::accent()));
-                    ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
+                    ui.ctx().request_repaint_after(web_time::Duration::from_millis(100));
                     ui.add_space(8.0);
                     self.closing |= ui.button(t("Cancel")).clicked();
                 });
@@ -329,7 +331,7 @@ impl Preview {
                         _ => 0.0,
                     };
                     ui.add(crate::theme::Bar::new(done).desired_width(160.0).desired_height(8.0).fill(crate::theme::accent()));
-                    ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
+                    ui.ctx().request_repaint_after(web_time::Duration::from_millis(100));
                 }
                 Some(None) => {}
                 Some(Some(o)) => {
@@ -382,7 +384,7 @@ impl Preview {
         // The highway, with the chart's Clone Hero leaderboard beside it when there's room
         // (on the right, or the left in a right-to-left language).
         let (full, _) = ui.allocate_exact_size(size, Sense::hover());
-        let board_w = if full.width() >= 620.0 { (full.width() * 0.38).clamp(260.0, 380.0) } else { 0.0 };
+        let board_w = if full.width() >= 620.0 && crate::players::available() { (full.width() * 0.38).clamp(260.0, 380.0) } else { 0.0 };
         let gap = if board_w > 0.0 { 8.0 } else { 0.0 };
         let (rect, board_rect) = if crate::i18n::rtl() {
             let board = egui::Rect::from_min_size(full.min, vec2(board_w, full.height()));
@@ -637,15 +639,24 @@ impl Preview {
                     let (name, artist, _) = &self.titles;
                     let file = crate::api::sanitize_filename(&format!("{artist} - {name} ({})", t(INSTRUMENTS[key.0 as usize].1)));
                     let ext = format.extension();
+                    #[cfg(not(target_arch = "wasm32"))]
                     if let Some(path) = rfd::FileDialog::new().set_file_name(format!("{file}.{ext}")).add_filter(format.name(), &[ext]).save_file() {
                         // Drawing a long chart into pixels takes a moment, so it's done in the background.
                         let (tx, rx) = channel();
                         let (layout, ctx) = (layout.clone(), ui.ctx().clone());
-                        thread::spawn(move || {
-                            let _ = tx.send(layout.save(&path, format).map(|()| path.display().to_string()).map_err(|e| format!("{e:#}")));
+                        crate::task::spawn(move || async move {
+                            let saved = layout.encode(format).and_then(|bytes| Ok(std::fs::write(&path, bytes)?));
+                            let _ = tx.send(saved.map(|()| path.display().to_string()).map_err(|e| format!("{e:#}")));
                             ctx.request_repaint();
                         });
                         self.save_status = Some(SaveStatus::Saving(rx));
+                    }
+                    // The browser saves it as a download.
+                    #[cfg(target_arch = "wasm32")]
+                    {
+                        let name = format!("{file}.{ext}");
+                        let result = layout.encode(format).map(|bytes| crate::web::save_file(&name, &bytes));
+                        self.save_status = Some(SaveStatus::Done(result.map(|()| name).map_err(|e| format!("{e:#}"))));
                     }
                 }
                 if let Some(SaveStatus::Saving(rx)) = &self.save_status
@@ -736,8 +747,8 @@ pub(crate) struct Loaded {
 }
 
 /// Downloads (or reads from the cache) a chart's notes; `progress` goes from 0 to 1000.
-pub(crate) fn load(client: &Client, chart: &Chart, progress: &AtomicU32) -> anyhow::Result<Loaded> {
-    let (ini, name, bytes) = client.fetch_notes(chart, progress)?;
+pub(crate) async fn load(client: &Client, chart: &Chart, progress: &AtomicU32) -> anyhow::Result<Loaded> {
+    let (ini, name, bytes) = client.fetch_notes(chart, progress).await?;
     let file = Some((name, bytes));
     let pro = chart.drum_type == Some(1) || ini_flag(&ini, "pro_drums");
     let mut parsed = match file {
@@ -997,7 +1008,7 @@ mod tests {
         picks.extend(cat.charts.iter().filter(ok).step_by(9973).take(5));
         let (mut same, mut total) = (0, 0);
         for c in picks {
-            match load(&client, c, &AtomicU32::new(0)) {
+            match pollster::block_on(load(&client, c, &AtomicU32::new(0))) {
                 Err(e) => println!("FAILED {}: {e:#}", c.title()),
                 Ok(Loaded { song, .. }) => {
                     println!("{}", c.title());

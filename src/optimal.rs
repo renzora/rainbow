@@ -117,16 +117,14 @@ pub fn optimise_cached(
 ) -> Option<Outcome> {
     let dir = crate::catalogue::cache_dir().join("optimal");
     let path = dir.join(format!("{md5}_{inst}_{diff}_v{CACHE_VERSION}.json"));
-    if let Ok(saved) = std::fs::read(&path)
+    if let Some(saved) = crate::store::read(&path)
         && let Ok(outcome) = serde_json::from_slice::<Option<Outcome>>(&saved)
     {
         return outcome;
     }
     let outcome = optimise_with_progress(chart, inst, diff, sustain_cutoff, Options::default(), progress);
-    if std::fs::create_dir_all(&dir).is_ok()
-        && let Ok(json) = serde_json::to_vec(&outcome)
-    {
-        let _ = std::fs::write(&path, json);
+    if let Ok(json) = serde_json::to_vec(&outcome) {
+        let _ = crate::store::write(&path, &json);
     }
     outcome
 }
@@ -1247,7 +1245,7 @@ mod tests {
                     &std::fs::read_to_string(path.join("notes.chart")).unwrap(),
                 ),
             };
-            let started = std::time::Instant::now();
+            let started = web_time::Instant::now();
             let out = optimise(
                 &chart,
                 inst,

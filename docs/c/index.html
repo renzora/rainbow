@@ -50,9 +50,11 @@
   <p class="charter" id="charter"></p>
   <p class="id" id="id"></p>
   <a class="button primary" id="open" href="#">Open in Rainbow</a>
+  <a class="button" id="web" href="../">Open in your browser</a>
   <a class="button" href="https://github.com/renzora/rainbow/releases/latest">Download Rainbow</a>
   <p class="note">Rainbow searches and downloads Clone Hero charts from Chorus Encore.
-    If nothing happens, install Rainbow and open it once, then try the link again.</p>
+    If nothing happens, install Rainbow and open it once, then try the link again,
+    or use Rainbow right here in your browser.</p>
 </main>
 <script>
   // The chart id is the query string: an MD5, or the start of one (?9403b89cc3d2).
@@ -66,6 +68,7 @@
   } else {
     const link = "rainbow://" + id;
     $("open").href = link;
+    $("web").href = "../?c=" + id;
     $("id").textContent = link;
     // Try opening Rainbow straight away; the button is there if the browser asks first.
     setTimeout(() => { location.href = link; }, 300);

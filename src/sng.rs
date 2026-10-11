@@ -1,7 +1,6 @@
 //! Unpacks .sng files (https://github.com/mdsitton/SngFileFormat) into a chart folder,
 //! generating song.ini from the .sng's metadata, the same way Bridge's "Chart Folder" format does.
 
-use std::fs;
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
@@ -70,16 +69,25 @@ pub fn read_file(data: &[u8], names: &[&str]) -> Result<(String, Option<(String,
     Ok((c.ini, None))
 }
 
-/// Extracts `sng_path` into the directory `out_dir` (created if needed).
-pub fn extract(sng_path: &Path, out_dir: &Path) -> Result<()> {
-    let data = fs::read(sng_path)?;
-    let c = contents(&data)?;
-    fs::create_dir_all(out_dir)?;
-    fs::write(out_dir.join("song.ini"), &c.ini)?;
+/// Every file in a .sng, song.ini first, with names that are safe to save.
+pub fn files(data: &[u8]) -> Result<Vec<(String, Vec<u8>)>> {
+    let c = contents(data)?;
+    let mut out = vec![("song.ini".to_owned(), c.ini.clone().into_bytes())];
     for (name, offset, len) in &c.files {
         // File names come from the download; never let them escape the chart folder.
-        let name = Path::new(name).file_name().context("bad file name in .sng")?.to_owned();
-        fs::write(out_dir.join(name), c.data(&data, *offset, *len)?)?;
+        let name = Path::new(name).file_name().and_then(|n| n.to_str()).context("bad file name in .sng")?.to_owned();
+        out.push((name, c.data(data, *offset, *len)?));
+    }
+    Ok(out)
+}
+
+/// Extracts `sng_path` into the directory `out_dir` (created if needed).
+#[cfg(not(target_arch = "wasm32"))]
+pub fn extract(sng_path: &Path, out_dir: &Path) -> Result<()> {
+    let data = std::fs::read(sng_path)?;
+    std::fs::create_dir_all(out_dir)?;
+    for (name, bytes) in files(&data)? {
+        std::fs::write(out_dir.join(name), bytes)?;
     }
     Ok(())
 }

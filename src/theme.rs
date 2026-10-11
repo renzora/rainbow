@@ -9,7 +9,21 @@ use serde::{Deserialize, Serialize};
 /// Bundled fonts that are also used outside the UI (e.g. for saving path charts as images).
 pub const NOTO_SANS: &[u8] = include_bytes!("../assets/fonts/NotoSans.ttf");
 pub const NOTO_EMOJI: &[u8] = include_bytes!("../assets/fonts/NotoEmoji.ttf");
-pub const NOTO_SANS_JP: &[u8] = include_bytes!("../assets/fonts/NotoSansJP.ttf");
+#[cfg(not(target_arch = "wasm32"))]
+const NOTO_SANS_JP: &[u8] = include_bytes!("../assets/fonts/NotoSansJP.ttf");
+/// The web version downloads the Japanese font once it's running (it's most of the download).
+#[cfg(target_arch = "wasm32")]
+pub static WEB_NOTO_SANS_JP: std::sync::OnceLock<&'static [u8]> = std::sync::OnceLock::new();
+
+/// Japanese (and most Chinese) characters, for song titles: built into the desktop app. The web
+/// version starts with just the characters of the Japanese translation (tools/subset_cjk.py)
+/// and swaps in the full font once it has downloaded.
+pub fn noto_sans_jp() -> Option<&'static [u8]> {
+    #[cfg(not(target_arch = "wasm32"))]
+    return Some(NOTO_SANS_JP);
+    #[cfg(target_arch = "wasm32")]
+    return Some(WEB_NOTO_SANS_JP.get().copied().unwrap_or(include_bytes!("../assets/fonts/NotoSansJP-UI.ttf")));
+}
 
 const GREEN: Color32 = Color32::from_rgb(74, 201, 120);
 const RED: Color32 = Color32::from_rgb(235, 96, 96);
@@ -698,7 +712,6 @@ pub fn install_fonts(ctx: &egui::Context, choice: UiFont, language: &str) {
         ("noto-sans", NOTO_SANS),
         ("noto-sans-bold", &include_bytes!("../assets/fonts/NotoSans-Bold.ttf")[..]),
         ("noto-emoji", NOTO_EMOJI),
-        ("noto-sans-jp", NOTO_SANS_JP),
         // Only the characters Rainbow's Korean and Chinese translations use (tools/subset_cjk.py).
         ("noto-sans-kr", &include_bytes!("../assets/fonts/NotoSansKR-UI.ttf")[..]),
         ("noto-sans-sc", &include_bytes!("../assets/fonts/NotoSansSC-UI.ttf")[..]),
@@ -709,7 +722,10 @@ pub fn install_fonts(ctx: &egui::Context, choice: UiFont, language: &str) {
         ("atkinson", &include_bytes!("../assets/fonts/AtkinsonHyperlegible.ttf")[..]),
         ("lexend", &include_bytes!("../assets/fonts/Lexend.ttf")[..]),
         ("opendyslexic", &include_bytes!("../assets/fonts/OpenDyslexic.otf")[..]),
-    ] {
+    ]
+    .into_iter()
+    .chain(noto_sans_jp().map(|jp| ("noto-sans-jp", jp)))
+    {
         fonts.font_data.insert(name.to_owned(), Arc::new(FontData::from_static(bytes)));
     }
     let cjk: [&str; 4] = match language {
@@ -718,7 +734,12 @@ pub fn install_fonts(ctx: &egui::Context, choice: UiFont, language: &str) {
         "ko" => ["noto-sans-kr", "noto-sans-jp", "noto-sans-sc", "noto-sans-tc"],
         _ => ["noto-sans-jp", "noto-sans-kr", "noto-sans-sc", "noto-sans-tc"],
     };
-    let fallbacks: Vec<String> = ["noto-sans", "noto-emoji", "noto-sans-arabic"].into_iter().chain(cjk).map(str::to_owned).collect();
+    let fallbacks: Vec<String> = ["noto-sans", "noto-emoji", "noto-sans-arabic"]
+        .into_iter()
+        .chain(cjk)
+        .filter(|f| fonts.font_data.contains_key(*f))
+        .map(str::to_owned)
+        .collect();
 
     // The chosen face first; Noto covers anything it lacks, then egui's own symbol fonts.
     let proportional = fonts.families.entry(FontFamily::Proportional).or_default();

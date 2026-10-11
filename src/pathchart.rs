@@ -333,24 +333,24 @@ impl Format {
 }
 
 impl Layout {
-    /// Writes the chart to `path` in `format`. Pictures are drawn at twice the layout size for
+    /// The chart as a file in `format`. Pictures are drawn at twice the layout size for
     /// sharpness, scaled down when that would pass the format's size limit.
-    pub fn save(&self, path: &std::path::Path, format: Format) -> anyhow::Result<()> {
+    pub fn encode(&self, format: Format) -> anyhow::Result<Vec<u8>> {
         if format == Format::Svg {
-            std::fs::write(path, self.svg())?;
-            return Ok(());
+            return Ok(self.svg().into_bytes());
         }
         // WebP images can't be taller than 16383 pixels; keep the others reasonable too.
         let max_height = if format == Format::Webp { 16_000.0 } else { 32_000.0 };
         let scale = (max_height / self.height.max(1.0)).min(2.0);
         let image = self.raster(scale)?;
+        let mut out = std::io::Cursor::new(Vec::new());
         match format {
-            Format::Png => image.save_with_format(path, image::ImageFormat::Png)?,
-            Format::Jpeg => image::DynamicImage::ImageRgba8(image).to_rgb8().save_with_format(path, image::ImageFormat::Jpeg)?,
-            Format::Webp => image.save_with_format(path, image::ImageFormat::WebP)?,
+            Format::Png => image.write_to(&mut out, image::ImageFormat::Png)?,
+            Format::Jpeg => image::DynamicImage::ImageRgba8(image).to_rgb8().write_to(&mut out, image::ImageFormat::Jpeg)?,
+            Format::Webp => image.write_to(&mut out, image::ImageFormat::WebP)?,
             Format::Svg => unreachable!(),
         }
-        Ok(())
+        Ok(out.into_inner())
     }
 
     /// Draws the SVG version into pixels, using Rainbow's bundled fonts.
@@ -358,7 +358,7 @@ impl Layout {
         use resvg::{tiny_skia, usvg};
         let mut options = usvg::Options::default();
         let fonts = options.fontdb_mut();
-        for data in [crate::theme::NOTO_SANS, crate::theme::NOTO_EMOJI, crate::theme::NOTO_SANS_JP] {
+        for data in [crate::theme::NOTO_SANS, crate::theme::NOTO_EMOJI].into_iter().chain(crate::theme::noto_sans_jp()) {
             fonts.load_font_data(data.to_vec());
         }
         fonts.set_sans_serif_family("Noto Sans");
@@ -515,8 +515,8 @@ mod tests {
         let layout = super::build(&chart, inst, 0, cutoff, &outcome, &titles).unwrap();
         let out = std::path::PathBuf::from(std::env::var("SVG_OUT").expect("set SVG_OUT"));
         for format in super::Format::ALL {
-            let started = std::time::Instant::now();
-            layout.save(&out.with_extension(format.extension()), format).unwrap();
+            let started = web_time::Instant::now();
+            std::fs::write(out.with_extension(format.extension()), layout.encode(format).unwrap()).unwrap();
             println!("{} in {:.2}s", format.name(), started.elapsed().as_secs_f64());
         }
     }

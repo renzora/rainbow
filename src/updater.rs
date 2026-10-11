@@ -10,7 +10,7 @@
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use web_time::Duration;
 
 use anyhow::{Context, Result, bail};
 use reqwest::blocking::Client;
