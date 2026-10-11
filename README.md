@@ -30,10 +30,12 @@ It also runs in your browser, nothing to install: **<https://renzora.github.io/r
 - **Bulk downloads** of selected charts, every search result, or the entire library, with
   progress, stop/resume (already-downloaded charts are skipped), and a polite delay between
   downloads.
-- **Rock Band song conversion** (no Nautilus needed): drop Rock Band CON files (e.g. from
-  RhythmVerse) onto the window, or put them in your songs folder, and Rainbow turns them into
-  Clone Hero charts: `song.ini` from `songs.dta`, `notes.mid`, `album.png`, and the multitrack
-  audio split into per-instrument Ogg Vorbis stems. Encrypted official DLC can't be converted.
+- **Rock Band song conversion**: drop Rock Band CON files (e.g. from RhythmVerse) onto the
+  window, or put them in your songs folder, and Rainbow turns them into Clone Hero charts:
+  `song.ini` from `songs.dta`, `notes.mid`, `album.png`, and the multitrack audio split into
+  per-instrument Ogg Vorbis stems. It's a quick path for unencrypted customs only: encrypted
+  official DLC can't be converted. For anything beyond the basics, use
+  [Nautilus](https://github.com/NemosNautilus/Nautilus).
 - **Chart preview**: watch any chart's notes fall down a highway before downloading it.
 - **Clone Hero leaderboards**: a song's details show its top scores on the
   [Clone Hero leaderboards](https://leaderboards.clonehero.net) for each instrument and difficulty.
@@ -140,6 +142,11 @@ Rainbow is not affiliated with Chorus Encore, Bridge or Clone Hero.
 ## Credits
 
 Created by [Renzora Studios](https://github.com/renzora).
+
+Big thanks to [Nautilus](https://github.com/NemosNautilus/Nautilus) by NemosNautilus, the Rock
+Band tool suite the community has relied on since 2013. Rainbow's song conversion only covers the
+basics; Nautilus does far more, and it's well worth supporting.
+Find it at [nemosnautilus.com](https://nemosnautilus.com/nautilus/) and on its Discord.
 
 ## License
 
