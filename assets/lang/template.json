@@ -372,6 +372,7 @@
     "Short forms: artist, charter, year, difficulty, length, name; a space after the colon is fine": "",
     "just now": "",
     "{count} selected chart(s)": "",
+    "Rainbow needs your permission to save into {folder}. Click Download again and choose Allow.": "",
     "⭐  Favourites ({count})": "",
     "Looking up {name}…": "",
     "Couldn't look up {name}: {error}": "",

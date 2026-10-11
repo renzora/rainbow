@@ -561,11 +561,13 @@ impl Client {
             .await?;
 
         let rel = resolve_folder_name(&settings.folder_name, chart);
-        if web::folder_name().is_none() || !web::folder_allowed().await {
+        let Some(folder) = web::folder_name() else {
             let name = format!("{}.sng", rel.rsplit('/').next().unwrap_or(&rel));
             web::save_file(&name, &data);
             return Ok(PathBuf::from(name));
-        }
+        };
+        // (Asked for when the download starts; see App::start_download.)
+        anyhow::ensure!(web::folder_allowed().await, "the browser didn't allow saving into the folder {folder}");
         let (parent, stem) = match rel.rsplit_once('/') {
             Some((p, s)) => (format!("{p}/"), s.to_owned()),
             None => (String::new(), rel.clone()),

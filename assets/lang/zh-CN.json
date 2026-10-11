@@ -599,6 +599,7 @@
     "Save charts as ordinary downloads instead": "改为以普通下载保存谱面",
     "None chosen: charts are saved as ordinary downloads": "未选择：谱面以普通下载保存",
     "Point this at your Clone Hero or YARG songs folder. The browser asks once each visit before Rainbow saves into it.": "指向你的 Clone Hero 或 YARG 歌曲文件夹。每次访问时，浏览器会在 Rainbow 保存前询问一次。",
-    "This browser saves charts as ordinary downloads (always as .sng files). In Chrome or Edge, Rainbow can save straight into your songs folder.": "此浏览器以普通下载保存谱面（始终为 .sng 文件）。在 Chrome 或 Edge 中，Rainbow 可直接保存到歌曲文件夹。"
+    "This browser saves charts as ordinary downloads (always as .sng files). In Chrome or Edge, Rainbow can save straight into your songs folder.": "此浏览器以普通下载保存谱面（始终为 .sng 文件）。在 Chrome 或 Edge 中，Rainbow 可直接保存到歌曲文件夹。",
+    "Rainbow needs your permission to save into {folder}. Click Download again and choose Allow.": "Rainbow 需要你的许可才能保存到 {folder}。请再次点击下载并选择“允许”。"
   }
 }

@@ -169,6 +169,10 @@ enum Msg {
     /// The web version has downloaded a font it leaves out at first (see theme::noto_sans_jp).
     #[cfg(target_arch = "wasm32")]
     FontReady,
+    /// The browser didn't let the web version save into the songs folder, so the download
+    /// didn't start (it's kept, to resume after the next click).
+    #[cfg(target_arch = "wasm32")]
+    FolderBlocked,
 }
 
 enum CatStatus {
@@ -1081,6 +1085,13 @@ impl App {
             failed: 0,
         };
         task::spawn(move || async move {
+            // The web version asks to save into the songs folder now, while the click still counts
+            // (browsers only show the question just after one).
+            #[cfg(target_arch = "wasm32")]
+            if web::folder_name().is_some() && !web::folder_allowed().await {
+                let _ = w.tx.send(Msg::FolderBlocked);
+                return;
+            }
             // Already-downloaded charts are skipped, so resuming just runs the same list again.
             let pending = Pending { title, charts };
             pending.save();
@@ -1193,6 +1204,17 @@ impl App {
                     self.status = Some((s, Instant::now()));
                 }
                 Msg::Log(line) => self.log(line),
+                #[cfg(target_arch = "wasm32")]
+                Msg::FolderBlocked => {
+                    self.job = None;
+                    let folder = web::folder_name().unwrap_or_default();
+                    self.log(format!("The browser didn't allow saving into the folder {folder}"));
+                    self.toast = Some((
+                        tr!("Rainbow needs your permission to save into {folder}. Click Download again and choose Allow.", folder = folder),
+                        None,
+                        Instant::now(),
+                    ));
+                }
                 #[cfg(target_arch = "wasm32")]
                 Msg::FontReady => {
                     theme::install_fonts(ctx, self.settings.font, &i18n::current());

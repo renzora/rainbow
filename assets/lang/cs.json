@@ -599,6 +599,7 @@
     "Save charts as ordinary downloads instead": "Ukládat charty jako běžná stahování",
     "None chosen: charts are saved as ordinary downloads": "Nevybráno: charty se ukládají jako běžná stahování",
     "Point this at your Clone Hero or YARG songs folder. The browser asks once each visit before Rainbow saves into it.": "Nastavte na složku skladeb Clone Hero nebo YARG. Prohlížeč se při každé návštěvě jednou zeptá, než do ní Rainbow začne ukládat.",
-    "This browser saves charts as ordinary downloads (always as .sng files). In Chrome or Edge, Rainbow can save straight into your songs folder.": "Tento prohlížeč ukládá charty jako běžná stahování (vždy jako soubory .sng). V Chrome nebo Edge umí Rainbow ukládat přímo do složky skladeb."
+    "This browser saves charts as ordinary downloads (always as .sng files). In Chrome or Edge, Rainbow can save straight into your songs folder.": "Tento prohlížeč ukládá charty jako běžná stahování (vždy jako soubory .sng). V Chrome nebo Edge umí Rainbow ukládat přímo do složky skladeb.",
+    "Rainbow needs your permission to save into {folder}. Click Download again and choose Allow.": "Rainbow potřebuje vaše svolení k ukládání do {folder}. Klikněte znovu na Stáhnout a zvolte Povolit."
   }
 }
