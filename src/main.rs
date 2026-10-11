@@ -3954,6 +3954,10 @@ fn accessibility_card(ui: &mut egui::Ui, s: &mut Settings, width: f32, actions: 
 }
 
 fn catalogue_card(ui: &mut egui::Ui, s: &mut Settings, width: f32, building: bool, actions: &mut SettingsActions) {
+    // The web version's catalogue comes ready-made with the page (refreshed daily on GitHub).
+    if cfg!(target_arch = "wasm32") {
+        return;
+    }
     settings_card(ui, width, &t("📚  Catalogue"), &t("Rainbow's local copy of Encore's chart list, for instant search."), |ui| {
         let size = std::fs::metadata(catalogue::path()).map(|m| m.len()).unwrap_or(0);
         ui.label(RichText::new(format!("{}  ·  {:.1} MB", catalogue::path().display(), size as f64 / 1_048_576.0)).size(13.0).weak());
