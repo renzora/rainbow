@@ -3318,6 +3318,8 @@ impl App {
                 ui.weak(t("You can stop at any time; next time it picks up where it left off."));
                 ui.add_space(8.0);
                 theme::checkbox(ui, &mut self.settings.video, &t("🎬 Download video backgrounds (much larger)"));
+                // (The web version always saves .sng files; see Client::download.)
+                #[cfg(not(target_arch = "wasm32"))]
                 crate::theme::hrow(ui, |ui| {
                     ui.label(t("Format:"));
                     ui.radio_value(&mut self.settings.format, DownloadFormat::Sng, ".sng");
