@@ -1,6 +1,7 @@
 //! Unpacks .sng files (https://github.com/mdsitton/SngFileFormat) into a chart folder,
 //! generating song.ini from the .sng's metadata, the same way Bridge's "Chart Folder" format does.
 
+#[cfg(not(target_arch = "wasm32"))]
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
@@ -46,6 +47,7 @@ impl Contents {
         &self.ini
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     fn data(&self, data: &[u8], offset: usize, len: usize) -> Result<Vec<u8>> {
         let end = offset.checked_add(len).filter(|&e| e <= data.len()).context("truncated .sng file data")?;
         Ok(self.unmask(&data[offset..end]))
@@ -70,6 +72,7 @@ pub fn read_file(data: &[u8], names: &[&str]) -> Result<(String, Option<(String,
 }
 
 /// Every file in a .sng, song.ini first, with names that are safe to save.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn files(data: &[u8]) -> Result<Vec<(String, Vec<u8>)>> {
     let c = contents(data)?;
     let mut out = vec![("song.ini".to_owned(), c.ini.clone().into_bytes())];

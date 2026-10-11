@@ -600,6 +600,7 @@
     "None chosen: charts are saved as ordinary downloads": "Belum dipilih: chart disimpan sebagai unduhan biasa",
     "Point this at your Clone Hero or YARG songs folder. The browser asks once each visit before Rainbow saves into it.": "Arahkan ke folder lagu Clone Hero atau YARG kamu. Browser bertanya sekali setiap kunjungan sebelum Rainbow menyimpan ke sana.",
     "This browser saves charts as ordinary downloads (always as .sng files). In Chrome or Edge, Rainbow can save straight into your songs folder.": "Browser ini menyimpan chart sebagai unduhan biasa (selalu berupa file .sng). Di Chrome atau Edge, Rainbow bisa menyimpan langsung ke folder lagumu.",
-    "Rainbow needs your permission to save into {folder}. Click Download again and choose Allow.": "Rainbow perlu izinmu untuk menyimpan ke {folder}. Klik Unduh lagi lalu pilih Izinkan."
+    "Rainbow needs your permission to save into {folder}. Click Download again and choose Allow.": "Rainbow perlu izinmu untuk menyimpan ke {folder}. Klik Unduh lagi lalu pilih Izinkan.",
+    "The web version saves .sng files, one per chart, which Clone Hero and YARG read directly. (Browsers don't allow the song.ini file a chart folder needs.)": "Versi web menyimpan file .sng, satu per chart, yang langsung dibaca Clone Hero dan YARG. (Browser tidak mengizinkan file song.ini yang dibutuhkan folder chart.)"
   }
 }

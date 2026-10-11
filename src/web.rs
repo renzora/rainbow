@@ -31,8 +31,6 @@ extern "C" {
     async fn js_folder_write(parts: Vec<String>, bytes: &[u8], append: bool) -> Result<JsValue, JsValue>;
     #[wasm_bindgen(js_name = folder_read)]
     async fn js_folder_read(parts: Vec<String>) -> JsValue;
-    #[wasm_bindgen(js_name = folder_remove)]
-    async fn js_folder_remove(parts: Vec<String>) -> JsValue;
     #[wasm_bindgen(js_name = save_file)]
     fn js_save_file(name: &str, bytes: &[u8]);
     #[wasm_bindgen(js_name = sleep)]
@@ -116,10 +114,6 @@ pub async fn folder_write(path: &str, bytes: &[u8], append: bool) -> Result<()> 
 pub async fn folder_read(path: &str) -> Option<Vec<u8>> {
     let v = js_folder_read(parts(path)).await;
     (!v.is_null()).then(|| js_sys::Uint8Array::new(&v).to_vec())
-}
-
-pub async fn folder_remove(path: &str) {
-    js_folder_remove(parts(path)).await;
 }
 
 // ─────────────────────────────── The page ───────────────────────────────

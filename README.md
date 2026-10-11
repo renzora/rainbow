@@ -63,7 +63,8 @@ everything the desktop app has except updating itself, `rainbow://` links, and i
 and Rock Band songs. Differences:
 
 - **Downloads:** in Chrome and Edge you choose your songs folder once (Settings → Chart library)
-  and charts are saved straight into it; the browser asks for permission once per visit. Other
+  and charts are saved straight into it as `.sng` files (browsers won't create the `song.ini` a
+  chart folder needs); the browser asks for permission once per visit. Other
   browsers save each chart as an ordinary download (a `.sng` file).
 - **Catalogue:** a copy of Encore's whole chart list is published with the page and refreshed
   daily, so it's ready in seconds; Rainbow then fetches anything newer from Encore.

@@ -600,6 +600,7 @@
     "None chosen: charts are saved as ordinary downloads": "Chưa chọn: chart được lưu dưới dạng tệp tải về thông thường",
     "Point this at your Clone Hero or YARG songs folder. The browser asks once each visit before Rainbow saves into it.": "Chọn thư mục bài hát Clone Hero hoặc YARG của bạn. Trình duyệt hỏi một lần mỗi lần truy cập trước khi Rainbow lưu vào đó.",
     "This browser saves charts as ordinary downloads (always as .sng files). In Chrome or Edge, Rainbow can save straight into your songs folder.": "Trình duyệt này lưu chart dưới dạng tệp tải về thông thường (luôn là tệp .sng). Trên Chrome hoặc Edge, Rainbow có thể lưu thẳng vào thư mục bài hát.",
-    "Rainbow needs your permission to save into {folder}. Click Download again and choose Allow.": "Rainbow cần bạn cho phép để lưu vào {folder}. Hãy bấm Tải xuống lần nữa và chọn Cho phép."
+    "Rainbow needs your permission to save into {folder}. Click Download again and choose Allow.": "Rainbow cần bạn cho phép để lưu vào {folder}. Hãy bấm Tải xuống lần nữa và chọn Cho phép.",
+    "The web version saves .sng files, one per chart, which Clone Hero and YARG read directly. (Browsers don't allow the song.ini file a chart folder needs.)": "Bản web lưu tệp .sng, mỗi chart một tệp, Clone Hero và YARG đọc trực tiếp. (Trình duyệt không cho phép tệp song.ini mà thư mục chart cần.)"
   }
 }

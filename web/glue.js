@@ -139,13 +139,6 @@ export async function folder_read(parts) {
   }
 }
 
-export async function folder_remove(parts) {
-  try {
-    const dir = await dir_of(parts.slice(0, -1), false);
-    await dir.removeEntry(parts[parts.length - 1], { recursive: true });
-  } catch (e) {}
-}
-
 // ── Other ──
 
 // Saves bytes as an ordinary browser download.

@@ -15,7 +15,7 @@ use serde_json::{Value, json};
 use web_time::{SystemTime, UNIX_EPOCH};
 
 use crate::net::{Http, Resp, StatusCode};
-use crate::settings::{DownloadFormat, Settings};
+use crate::settings::Settings;
 use crate::task::sleep;
 use crate::{sng, store};
 
@@ -490,6 +490,7 @@ impl Client {
     /// `progress` is called with (bytes so far, total bytes if known).
     #[cfg(not(target_arch = "wasm32"))]
     pub async fn download(&self, chart: &Chart, settings: &Settings, mut progress: impl FnMut(u64, Option<u64>)) -> Result<PathBuf> {
+        use crate::settings::DownloadFormat;
         use std::fs::{self, File};
         use std::io::Write;
 
@@ -538,8 +539,8 @@ impl Client {
         Ok(dest)
     }
 
-    /// Downloads a chart into the songs folder the browser was given (as a .sng file or an
-    /// extracted chart folder), or, without one, as an ordinary download (always a .sng then).
+    /// Downloads a chart into the songs folder the browser was given, or, without one, as an
+    /// ordinary download. Either way it's a .sng file (see below).
     /// Returns where it went, relative to the songs folder.
     #[cfg(target_arch = "wasm32")]
     pub async fn download(&self, chart: &Chart, settings: &Settings, mut progress: impl FnMut(u64, Option<u64>)) -> Result<PathBuf> {
@@ -572,31 +573,15 @@ impl Client {
             Some((p, s)) => (format!("{p}/"), s.to_owned()),
             None => (String::new(), rel.clone()),
         };
-        let ext = match settings.format {
-            DownloadFormat::Sng => ".sng",
-            DownloadFormat::Folder => "",
-        };
-        let mut dest = format!("{parent}{stem}{ext}");
+        // Always a .sng: browsers won't let a page create song.ini (Chrome blocks .ini files as
+        // risky), which a chart folder needs.
+        let mut dest = format!("{parent}{stem}.sng");
         let mut n = 2;
         while web::folder_has(&dest).await {
-            dest = format!("{parent}{stem} ({n}){ext}");
+            dest = format!("{parent}{stem} ({n}).sng");
             n += 1;
         }
-        match settings.format {
-            DownloadFormat::Sng => web::folder_write(&dest, &data, false).await?,
-            DownloadFormat::Folder => {
-                let written = async {
-                    for (name, bytes) in sng::files(&data)? {
-                        web::folder_write(&format!("{dest}/{name}"), &bytes, false).await?;
-                    }
-                    anyhow::Ok(())
-                };
-                if let Err(e) = written.await {
-                    web::folder_remove(&dest).await;
-                    return Err(e);
-                }
-            }
-        }
+        web::folder_write(&dest, &data, false).await?;
         Ok(PathBuf::from(dest))
     }
 }

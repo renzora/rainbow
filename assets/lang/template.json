@@ -247,6 +247,7 @@
     "How charts are saved, and how politely bulk downloads run.": "",
     "Format": "",
     ".sng is one file per chart. Chart Folder unpacks it with song.ini.": "",
+    "The web version saves .sng files, one per chart, which Clone Hero and YARG read directly. (Browsers don't allow the song.ini file a chart folder needs.)": "",
     "Wait between bulk downloads": "",
     "Encore is donation-funded, so please keep this reasonable.": "",
     "Resume unfinished downloads": "",

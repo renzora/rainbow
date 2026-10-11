@@ -3745,9 +3745,13 @@ fn library_card(ui: &mut egui::Ui, s: &mut Settings, width: f32, busy: bool, exa
 fn downloads_card(ui: &mut egui::Ui, s: &mut Settings, width: f32, busy: bool, actions: &mut SettingsActions) {
     settings_card(ui, width, &t("⬇  Downloads"), &t("How charts are saved, and how politely bulk downloads run."), |ui| {
         ui.add_enabled_ui(!busy, |ui| {
+            #[cfg(not(target_arch = "wasm32"))]
             setting_row(ui, &t("Format"), &t(".sng is one file per chart. Chart Folder unpacks it with song.ini."), |ui| {
                 segmented(ui, &mut s.format, &[(DownloadFormat::Sng, ".sng"), (DownloadFormat::Folder, n("Chart Folder"))]);
             });
+            // Browsers won't let a page create song.ini, so the web version only saves .sng files.
+            #[cfg(target_arch = "wasm32")]
+            setting_row(ui, &t("Format"), &t("The web version saves .sng files, one per chart, which Clone Hero and YARG read directly. (Browsers don't allow the song.ini file a chart folder needs.)"), |_| {});
             setting_row(
                 ui,
                 &t("Wait between bulk downloads"),
