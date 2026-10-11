@@ -3983,6 +3983,10 @@ fn catalogue_card(ui: &mut egui::Ui, s: &mut Settings, width: f32, building: boo
 }
 
 fn updates_card(ui: &mut egui::Ui, s: &mut Settings, width: f32, updates: &mut updater::Updates) {
+    // The web version is always the newest; there's nothing to update.
+    if cfg!(target_arch = "wasm32") {
+        return;
+    }
     settings_card(ui, width, &t("⬆  Updates"), &t("New versions of Rainbow from GitHub."), |ui| {
         updates.settings(ui);
         setting_row(ui, &t("Check for updates on startup"), &t("Looks for a newer version each time Rainbow opens."), |ui| {
