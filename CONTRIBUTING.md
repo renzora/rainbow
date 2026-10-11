@@ -50,6 +50,7 @@ both. Code that only makes sense on one is marked `#[cfg(target_arch = "wasm32")
 | `src/preview.rs`, `src/pathchart.rs` | The falling-notes preview and the star power path chart |
 | `src/optimal.rs`, `src/drums.rs` | Optimal score: Clone Hero scoring and the star power path search (drums have their own rules) |
 | `src/players.rs`, `src/leaderboard.rs`, `src/trackhash/` | Clone Hero players, profiles and leaderboards |
+| `src/rhythmverse.rs` | RhythmVerse's charts: the published list, fetching it for the workflow, and installing downloads |
 | `src/rockband.rs`, `src/stfs.rs`, `src/dta.rs` | Converting Rock Band songs |
 | `src/updater.rs` | Updating from GitHub releases (`src/updater_web.rs` stands in for it on the web) |
 | `src/links.rs`, `docs/c/` | `rainbow://` chart links, and the web page shared links open |

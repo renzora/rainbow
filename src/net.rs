@@ -58,6 +58,11 @@ impl Req {
         Req(self.0.json(body))
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn body(self, body: String) -> Self {
+        Req(self.0.body(body))
+    }
+
     pub fn timeout(self, d: Duration) -> Self {
         Req(self.0.timeout(d))
     }

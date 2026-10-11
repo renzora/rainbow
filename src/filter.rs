@@ -71,6 +71,15 @@ fn within((min, max): (Option<f64>, Option<f64>), v: f64) -> bool {
     min.is_none_or(|m| v >= m) && max.is_none_or(|m| v <= m)
 }
 
+/// Where charts come from.
+#[derive(Clone, Copy, PartialEq, Default, Debug)]
+pub enum Source {
+    #[default]
+    Any,
+    Encore,
+    RhythmVerse,
+}
+
 #[derive(Clone, Copy, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub enum SortKey {
     #[default]
@@ -124,6 +133,8 @@ pub struct Filters {
     pub legacy: bool,
     /// Only charts from this game (a `games::game_key`).
     pub game: Option<String>,
+    /// Only charts from Encore, or from RhythmVerse.
+    pub source: Source,
 
     pub sort: SortKey,
     pub descending: bool,
@@ -275,13 +286,24 @@ impl Index {
                 if f.legacy && !self.legacy[i] || f.game.is_some() && self.game[i] != f.game {
                     return false;
                 }
+                match f.source {
+                    Source::Encore if !c.on_encore() => return false,
+                    Source::RhythmVerse if c.on_encore() => return false,
+                    _ => {}
+                }
                 // Instrument / difficulty: the chart must have notes for them.
                 let stats: Vec<_> = c
                     .notes
                     .iter()
                     .filter(|s| f.instrument.is_none_or(|i| s.i == i) && f.difficulty.is_none_or(|d| s.d == d))
                     .collect();
-                if (f.instrument.is_some() || f.difficulty.is_some()) && stats.is_empty() {
+                // (RhythmVerse doesn't say which difficulties a chart has, just how hard each
+                // instrument is.)
+                if c.on_encore() {
+                    if (f.instrument.is_some() || f.difficulty.is_some()) && stats.is_empty() {
+                        return false;
+                    }
+                } else if f.instrument.is_some_and(|i| c.diffs[i as usize] < 0) {
                     return false;
                 }
                 if f.instrument == Some(DRUMS) && f.drum_type.is_some() && c.drum_type != f.drum_type {

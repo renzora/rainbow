@@ -139,15 +139,22 @@ async fn loader(queue: Queue, loaders: Arc<AtomicUsize>, tx: Sender<Done>, http:
 
 async fn load(http: &Http, key: &Key) -> Option<egui::ColorImage> {
     use image::imageops::FilterType;
-    // Art hashes come from the API; only allow plain hex so they're safe as file names.
-    if key.art.is_empty() || !key.art.chars().all(|c| c.is_ascii_hexdigit()) {
+    // Encore's art hashes come from its API; only allow plain hex so they're safe as file
+    // names. Art from elsewhere (RhythmVerse) is a full URL, cached under a hash of it.
+    let web = key.art.starts_with("https://");
+    // (RhythmVerse doesn't let other websites' pages fetch its images.)
+    if cfg!(target_arch = "wasm32") && web {
         return None;
     }
-    let path = cache_dir().join(format!("{}_{}.jpg", key.art, key.size));
+    let name = if web { blake3::hash(key.art.as_bytes()).to_hex()[..32].to_owned() } else { key.art.clone() };
+    if key.art.is_empty() || !(web || key.art.chars().all(|c| c.is_ascii_hexdigit())) {
+        return None;
+    }
+    let path = cache_dir().join(format!("{name}_{}.jpg", key.size));
     let img = match crate::store::read(&path).and_then(|b| image::load_from_memory(&b).ok()) {
         Some(img) => img,
         None => {
-            let url = format!("{FILES_URL}/{}.jpg", key.art);
+            let url = if web { key.art.clone() } else { format!("{FILES_URL}/{}.jpg", key.art) };
             let bytes = http.get(&url).send().await.ok()?.error_for_status().ok()?.bytes().await.ok()?;
             let full = image::load_from_memory(&bytes).ok()?;
             let small = full.resize(key.size, key.size, FilterType::Triangle);

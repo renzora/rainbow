@@ -87,7 +87,7 @@ pub fn set_aside(path: &Path, dir: &Path, subdir: &str, delete: bool) -> Result<
     Ok(())
 }
 
-fn unique_dir(dir: &Path, name: &str) -> PathBuf {
+pub fn unique_dir(dir: &Path, name: &str) -> PathBuf {
     let mut path = dir.join(name);
     let mut n = 2;
     while path.exists() {

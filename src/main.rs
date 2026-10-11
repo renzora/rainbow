@@ -21,6 +21,7 @@ mod players;
 mod pathchart;
 mod preview;
 mod query;
+mod rhythmverse;
 mod scores;
 mod settings;
 mod sng;
@@ -97,6 +98,19 @@ fn main() -> eframe::Result {
         }
         return Ok(());
     }
+    // `rainbow --update-rhythmverse <file> [--full]`: the same for RhythmVerse's chart list,
+    // which also writes <file>'s recent changes next to it (see rhythmverse.rs).
+    if let Some(k) = args.iter().position(|a| a == "--update-rhythmverse") {
+        let Some(file) = args.get(k + 1) else {
+            eprintln!("usage: rainbow --update-rhythmverse <file> [--full]");
+            std::process::exit(2);
+        };
+        if let Err(e) = update_rhythmverse_file(std::path::Path::new(file), args.iter().any(|a| a == "--full")) {
+            eprintln!("couldn't update {file}: {e:#}");
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
     // Opened from a rainbow:// link while Rainbow is already running: pass it over and stop.
     let link = links::from_args();
     if let Some(id) = &link
@@ -144,6 +158,22 @@ fn update_catalogue_file(file: &std::path::Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Updates (or builds) RhythmVerse's chart list in `file`, and writes its recent changes to
+/// `<file stem>-recent.json` beside it.
+#[cfg(not(target_arch = "wasm32"))]
+fn update_rhythmverse_file(file: &std::path::Path, full: bool) -> anyhow::Result<()> {
+    let mut cat: rhythmverse::Catalogue = std::fs::read(file).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+    eprintln!("{} charts to start with", cat.charts.len());
+    let added = pollster::block_on(rhythmverse::crawl(&mut cat, full, &|m| eprintln!("{m}")))?;
+    anyhow::ensure!(!cat.charts.is_empty(), "RhythmVerse's list came back empty");
+    cat.save_to(file)?;
+    let stem = file.file_stem().unwrap_or_default().to_string_lossy();
+    let recent = cat.recent();
+    recent.save_to(&file.with_file_name(format!("{stem}-recent.json")))?;
+    eprintln!("{} charts ({added} new, {} changed recently)", cat.charts.len(), recent.charts.len());
+    Ok(())
+}
+
 /// The web version: reads its saved files, then runs in the page's canvas (see web/index.html).
 #[cfg(target_arch = "wasm32")]
 fn main() {
@@ -175,6 +205,8 @@ enum Msg {
     TrackHash(Result<HashSet<String>, String>),
     CataloguePage { page: u32, pages: u32, charts: usize, new: Vec<Chart> },
     CatalogueDone(Result<(Catalogue, usize), String>),
+    /// RhythmVerse's chart list, brought up to date (and how many charts are new).
+    RhythmVerse(Result<(rhythmverse::Catalogue, usize), String>),
     FileProgress { title: String, done: u64, total: Option<u64> },
     Queue { checked: usize, downloaded: usize, failed: usize },
     Status(String),
@@ -384,6 +416,13 @@ struct App {
     leaderboard: leaderboard::Panel,
     /// Clone Hero player search and profiles.
     players: players::Players,
+    /// When RhythmVerse's chart list was last brought up to date (Unix time), whether that's
+    /// happening now, and how many charts it has.
+    rv_updated: u64,
+    rv_loading: bool,
+    rv_count: usize,
+    /// A web page to open (a RhythmVerse chart whose file Rainbow can't download itself).
+    open_url: Option<String>,
     /// The tab a profile was opened from, for the Players tab's Back button.
     prev_tab: Option<Tab>,
     /// A chart from a link, waiting to be found in the catalogue.
@@ -522,6 +561,10 @@ impl App {
             scores: scores::Scores::new(client.clone()),
             leaderboard: leaderboard::Panel::new(),
             players: players::Players::new(),
+            rv_updated: 0,
+            rv_loading: false,
+            rv_count: 0,
+            open_url: None,
             prev_tab: None,
             pending_link: None,
             focus_window: false,
@@ -575,6 +618,12 @@ impl App {
                 app.update_catalogue(false);
             }
         }
+        // RhythmVerse's charts, from the copy published with the web version (see rhythmverse.rs).
+        if let Some(rv) = rhythmverse::Catalogue::load() {
+            app.rv_updated = rv.updated;
+            app.set_rv(rv.charts);
+        }
+        app.refresh_rv(false);
         if let Some(pending) = Pending::load() {
             if app.settings.resume_downloads && !pending.charts.is_empty() {
                 app.log(format!("Resuming unfinished download: {}", pending.title));
@@ -609,6 +658,35 @@ impl App {
             app.updates.check(ctx);
         }
         app
+    }
+
+    /// Puts RhythmVerse's charts (newest first) in with Encore's, in order of when they changed.
+    fn set_rv(&mut self, rv: Vec<Chart>) {
+        let encore: Vec<Chart> = std::mem::take(&mut self.charts).into_iter().filter(Chart::on_encore).collect();
+        self.rv_count = rv.len();
+        self.replace_charts(newest_first(encore, rv));
+    }
+
+    /// Brings RhythmVerse's chart list up to date from the published copy, if it's been a while
+    /// (or `force`).
+    fn refresh_rv(&mut self, force: bool) {
+        if self.rv_loading || !force && now().saturating_sub(self.rv_updated) < rhythmverse::CHECK_EVERY_SECS {
+            return;
+        }
+        self.rv_loading = true;
+        let tx = self.tx.clone();
+        task::spawn(move || async move {
+            let result = rhythmverse::Catalogue::refresh(rhythmverse::Catalogue::load()).await;
+            let _ = tx.send(Msg::RhythmVerse(result.map_err(|e| format!("{e:#}"))));
+        });
+    }
+
+    /// Opens the preview, or for a RhythmVerse chart (which has none) its page there.
+    fn open_preview(&mut self, c: &Chart, ctx: &egui::Context) {
+        match &c.rv {
+            Some(rv) => self.open_url = Some(rhythmverse::page(rv)),
+            None => self.preview = Some(preview::Preview::open(&self.client, c, ctx, self.filters.instrument, self.filters.difficulty)),
+        }
     }
 
     fn replace_charts(&mut self, charts: Vec<Chart>) {
@@ -735,6 +813,7 @@ impl App {
         if self.auto_refreshed.elapsed() >= AUTO_REFRESH && now().saturating_sub(self.cat_updated) >= AUTO_REFRESH.as_secs() {
             self.auto_refreshed = Instant::now();
             self.update_catalogue(false);
+            self.refresh_rv(false);
         }
         ctx.request_repaint_after(Duration::from_secs(60));
     }
@@ -749,7 +828,7 @@ impl App {
                 updated: self.cat_updated,
                 complete: self.cat_complete,
                 next_page: self.cat_next_page,
-                charts: self.charts.clone(),
+                charts: self.charts.iter().filter(|c| c.on_encore()).cloned().collect(),
                 file: None,
             }
         };
@@ -757,8 +836,8 @@ impl App {
         self.cat_status = CatStatus::Building { page: cat.next_page, pages: 0, charts: cat.charts.len() };
         let (client, tx, stop) = (self.client.clone(), self.tx.clone(), self.cat_stop.clone());
         task::spawn(move || async move {
-            // A new visitor to the web version starts from the published copy of the catalogue.
-            #[cfg(target_arch = "wasm32")]
+            // A new visitor (or a first launch) starts from the copy of the catalogue published
+            // with the web version, so Encore needn't be asked for all of it page by page.
             if cat.charts.is_empty() {
                 match Catalogue::snapshot().await {
                     Ok(snapshot) => {
@@ -822,6 +901,7 @@ impl App {
         }
         if !cfg!(target_arch = "wasm32") && press(Modifiers::NONE, Key::F5) && !matches!(self.cat_status, CatStatus::Building { .. }) {
             self.update_catalogue(false);
+            self.refresh_rv(true);
         }
         if press(Modifiers::COMMAND, Key::D) && self.job.is_none() && !self.selected.is_empty() {
             let charts = self.selected_charts();
@@ -831,7 +911,7 @@ impl App {
         if press(Modifiers::COMMAND, Key::P)
             && let Some(c) = self.detail.clone()
         {
-            self.preview = Some(preview::Preview::open(&self.client, &c, ctx, self.filters.instrument, self.filters.difficulty));
+            self.open_preview(&c, ctx);
         }
 
         let typing = ctx.memory(|m| m.focused().is_some()) && ctx.egui_wants_keyboard_input();
@@ -1094,6 +1174,21 @@ impl App {
     }
 
     fn start_download(&mut self, title: String, charts: Vec<Chart>) {
+        // RhythmVerse charts whose files are elsewhere (or any, on the web) are opened there.
+        let (charts, elsewhere): (Vec<Chart>, Vec<Chart>) = charts.into_iter().partition(|c| c.rv.as_ref().is_none_or(rhythmverse::installable));
+        if let [only] = elsewhere.as_slice()
+            && charts.is_empty()
+            && let Some(rv) = &only.rv
+        {
+            self.open_url = Some(rhythmverse::page(rv));
+            return;
+        }
+        if !elsewhere.is_empty() {
+            self.log(format!("Left out {} RhythmVerse chart(s) Rainbow can't download itself (open them on RhythmVerse)", elsewhere.len()));
+        }
+        if charts.is_empty() {
+            return;
+        }
         let delay =
             if charts.len() > BULK { Duration::from_secs_f32(self.settings.delay_secs) } else { Duration::ZERO };
         self.stop.store(false, Ordering::Relaxed);
@@ -1217,16 +1312,36 @@ impl App {
                         self.cat_complete = true;
                         // Switch to the catalogue's own order (newest first) once it's whole.
                         if added > 0 || !was_complete {
-                            let extra: Vec<Chart> = {
+                            // Charts from live searches that the catalogue doesn't have stay, and
+                            // RhythmVerse's go in by date.
+                            let (rv, extra): (Vec<Chart>, Vec<Chart>) = {
                                 let in_cat: HashSet<&str> = cat.charts.iter().map(|c| c.md5.as_str()).collect();
-                                self.charts.iter().filter(|c| !in_cat.contains(c.md5.as_str())).cloned().collect()
+                                self.charts.iter().filter(|c| !in_cat.contains(c.md5.as_str())).cloned().partition(|c| !c.on_encore())
                             };
-                            self.replace_charts(cat.charts);
-                            self.add_charts(extra);
+                            let mut encore = cat.charts;
+                            encore.extend(extra);
+                            self.replace_charts(newest_first(encore, rv));
                         }
                     } else {
                         let how = if self.cat_stop.load(Ordering::Relaxed) { "paused" } else { "incomplete" };
                         self.log(format!("Catalogue {how} at {} charts", cat.charts.len()));
+                    }
+                }
+                Msg::RhythmVerse(result) => {
+                    self.rv_loading = false;
+                    match result {
+                        Ok((cat, added)) => {
+                            self.log(format!("RhythmVerse's charts up to date: {} charts ({added} new)", cat.charts.len()));
+                            if added > 0 || cat.updated != self.rv_updated || self.rv_count != cat.charts.len() {
+                                self.set_rv(cat.charts);
+                            }
+                            self.rv_updated = cat.updated;
+                        }
+                        Err(e) => {
+                            self.log(format!("Couldn't update RhythmVerse's charts: {e}"));
+                            // Try again in a while rather than every frame.
+                            self.rv_updated = now().saturating_sub(rhythmverse::CHECK_EVERY_SECS / 2);
+                        }
                     }
                 }
                 Msg::CatalogueDone(Err(e)) => {
@@ -1332,6 +1447,7 @@ impl App {
                 if matches!(tab, Tab::Players | Tab::Leaderboards) && !players::available() {
                     continue;
                 }
+
                 let on = self.tab == tab;
                 // Each tab has its own colour: filled when it's open, its label tinted otherwise.
                 let color = match tab {
@@ -1490,12 +1606,13 @@ impl App {
         ui.add_space(4.0);
         crate::theme::hrow(ui, |ui| {
             let f = &mut self.filters;
-            let all = !f.no_video && !f.no_broken && !f.legacy && f.game.is_none() && f.favourites.is_none() && f.advanced_count() == 0;
+            let all = !f.no_video && !f.no_broken && !f.legacy && f.game.is_none() && f.favourites.is_none() && f.source == filter::Source::Any && f.advanced_count() == 0;
             if pill(ui, all, &t("🌈  All songs")).on_hover_text(t("Clear all filters")).clicked() {
                 f.no_video = false;
                 f.no_broken = false;
                 f.legacy = false;
                 f.game = None;
+                f.source = filter::Source::Any;
                 f.favourites = None;
                 f.clear_advanced();
             }
@@ -1524,6 +1641,18 @@ impl App {
                 f.legacy = !(f.legacy || f.game.is_some());
                 f.game = None;
             }
+            // Where the charts come from.
+            let sources = [
+                (filter::Source::Any, t("🌐  Encore + RhythmVerse")),
+                (filter::Source::Encore, t("🌐  Encore only")),
+                (filter::Source::RhythmVerse, t("🌐  RhythmVerse only")),
+            ];
+            let current = sources.iter().find(|(s, _)| *s == f.source).map(|(_, l)| l.clone()).unwrap_or_default();
+            egui::ComboBox::from_id_salt("source").selected_text(current).show_ui(ui, |ui| {
+                for (s, label) in sources {
+                    ui.selectable_value(&mut f.source, s, label);
+                }
+            }).response.on_hover_text(t("Search Encore's charts, RhythmVerse's, or both")).on_hover_cursor(CursorIcon::PointingHand);
             let label = f.game.as_deref().map_or(t("🎮  Any game"), |g| format!("🎮  {}", games::game_name(g)));
             let index = &self.index;
             egui::ComboBox::from_id_salt("game").selected_text(label).width(240.0).show_ui(ui, |ui| {
@@ -2026,13 +2155,19 @@ impl App {
                             }
                         }
                         CatStatus::Idle if self.cat_complete => {
+                            let encore = self.charts.len() - self.rv_count;
+                            let sources = tr!("{encore} from Encore, {rv} from RhythmVerse", encore = encore, rv = self.rv_count);
                             ui.label(tr!("📚 {count} charts", count = self.charts.len()))
-                                .on_hover_text(tr!("updated {when}", when = ago(self.cat_updated)));
+                                .on_hover_text(format!("{sources}\n{}", tr!("updated {when}", when = ago(self.cat_updated))));
                             if level < 2 {
                                 ui.weak(tr!("updated {when}", when = ago(self.cat_updated)));
                             }
-                            if !cfg!(target_arch = "wasm32") && ui.small_button("⟳").on_hover_text(t("Check Encore for new charts")).clicked() {
+                            if self.rv_loading {
+                                ui.spinner().on_hover_text(t("Getting RhythmVerse's charts…"));
+                            }
+                            if !cfg!(target_arch = "wasm32") && ui.small_button("⟳").on_hover_text(t("Check Encore and RhythmVerse for new charts")).clicked() {
                                 self.update_catalogue(false);
+                                self.refresh_rv(true);
                             }
                         }
                         CatStatus::Idle => {
@@ -2362,6 +2497,11 @@ impl App {
             chips.push((format!("🏆 {}", games::game_name(g)), Box::new(|f| f.game = None)));
         } else if f.legacy {
             chips.push((t("🏆  Legacy"), Box::new(|f| f.legacy = false)));
+        }
+        match f.source {
+            filter::Source::Encore => chips.push((t("🌐  Encore only"), Box::new(|f| f.source = filter::Source::Any))),
+            filter::Source::RhythmVerse => chips.push((t("🌐  RhythmVerse only"), Box::new(|f| f.source = filter::Source::Any))),
+            filter::Source::Any => {}
         }
         for (label, range, clear) in [
             (n("Length"), &f.length_min, (|f: &mut Filters| f.length_min = Range::default()) as fn(&mut Filters)),
@@ -2769,10 +2909,11 @@ impl App {
                             }
                             Col::Cover => {
                                 let rect = cover(ui, covers, c.art.as_deref(), cover_px, covers::THUMB);
-                                // Hovering the cover shows a play button that opens the preview.
-                                let play = ui.interact(rect, ui.id().with(("cover_play", i)), Sense::click());
+                                // Hovering the cover shows a play button that opens the preview
+                                // (Encore's charts only: the preview needs their notes).
+                                let play = ui.interact(rect, ui.id().with(("cover_play", i)), if c.on_encore() { Sense::click() } else { Sense::hover() });
                                 play.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, t("Preview")));
-                                if play.hovered() {
+                                if play.hovered() && c.on_encore() {
                                     let p = ui.painter();
                                     p.rect_filled(rect, CornerRadius::same(5), Color32::from_black_alpha(110));
                                     let r = (rect.width() * 0.28).clamp(7.0, 22.0);
@@ -2786,6 +2927,9 @@ impl App {
                                 }
                             }
                             Col::Name => {
+                                if let Some(rv) = &c.rv {
+                                    rv_badge(ui, rv);
+                                }
                                 ui.label(RichText::new(text(&c.name)).strong().size(name_size));
                             }
                             Col::Artist => {
@@ -2947,7 +3091,7 @@ impl App {
             }
             Some(RowAction::Preview(i)) => {
                 let c = self.charts[self.results[i]].clone();
-                self.preview = Some(preview::Preview::open(&self.client, &c, ui.ctx(), self.filters.instrument, self.filters.difficulty));
+                self.open_preview(&c, ui.ctx());
             }
             Some(RowAction::Favourite(i)) => {
                 let md5 = self.charts[self.results[i]].md5.clone();
@@ -3069,6 +3213,19 @@ impl App {
         // The MD5 stays put at the top; the rest scrolls (from the top again for a new chart).
         ui.add_space(8.0);
         crate::theme::hrow(ui, |ui| {
+            // RhythmVerse's charts have a page there instead of an MD5.
+            if let Some(rv) = &c.rv {
+                rv_badge(ui, rv);
+                ui.weak(t("From RhythmVerse"));
+                ui.with_layout(crate::theme::trailing(), |ui| {
+                    let page = rhythmverse::page(rv);
+                    if ui.small_button("📋").on_hover_text(t("Copy the link to its RhythmVerse page")).clicked() {
+                        ui.ctx().copy_text(page.clone());
+                    }
+                    ui.hyperlink_to(t("Open ↗"), page);
+                });
+                return;
+            }
             ui.weak(t("MD5"));
             // The copy button sits at the right edge; the hash takes what's left and
             // shortens with "…" if needed (right-click or hover shows it in full).
@@ -3137,13 +3294,31 @@ impl App {
                         .min_size(vec2(half, 34.0));
                     let resp = ui.add(button);
                     reveal_it = !cfg!(target_arch = "wasm32") && resp.on_hover_text(t("Downloaded ✔  Open it in your file manager")).clicked();
+                } else if c.rv.as_ref().is_some_and(|rv| !rhythmverse::installable(rv)) {
+                    // Its file is somewhere Rainbow can't download from: the page has the link.
+                    let tip = if cfg!(target_arch = "wasm32") {
+                        t("RhythmVerse's charts can only be downloaded in the desktop app; its page has the download")
+                    } else {
+                        t("This chart's file is on another site; its RhythmVerse page has the link")
+                    };
+                    download = glossy(ui, download_button(&t("🌐  Get it on RhythmVerse")).min_size(vec2(half, 34.0)), theme::good().lerp_to_gamma(Color32::BLACK, 0.2), true)
+                        .on_hover_text(tip)
+                        .clicked();
                 } else {
                     download = glossy(ui, download_button(&t("⬇  Download")).min_size(vec2(half, 34.0)), theme::good().lerp_to_gamma(Color32::BLACK, 0.2), !busy).clicked();
                 }
-                let preview = egui::Button::new(RichText::new(t("▶  Preview")).size(14.5).strong().color(Color32::WHITE)).min_size(vec2(half, 34.0));
-                open_preview = glossy(ui, preview, Color32::from_rgb(124, 84, 210), true)
-                    .on_hover_text(t("Watch the notes fall, like in game (no audio)"))
-                    .clicked();
+                if c.on_encore() {
+                    let preview = egui::Button::new(RichText::new(t("▶  Preview")).size(14.5).strong().color(Color32::WHITE)).min_size(vec2(half, 34.0));
+                    open_preview = glossy(ui, preview, Color32::from_rgb(124, 84, 210), true)
+                        .on_hover_text(t("Watch the notes fall, like in game (no audio)"))
+                        .clicked();
+                } else {
+                    // (RhythmVerse's charts have no preview: it needs the notes, which only Encore serves on their own.)
+                    let page = egui::Button::new(RichText::new(t("🌐  RhythmVerse")).size(14.5).strong().color(Color32::WHITE)).min_size(vec2(half, 34.0));
+                    open_preview = glossy(ui, page, RV_COLOR.lerp_to_gamma(Color32::BLACK, 0.25), true)
+                        .on_hover_text(t("Open its page on RhythmVerse"))
+                        .clicked();
+                }
             });
             if download {
                 self.start_download(c.title(), vec![c.clone()]);
@@ -3152,7 +3327,7 @@ impl App {
                 self.reveal_chart(&c.md5);
             }
             if open_preview {
-                self.preview = Some(preview::Preview::open(&self.client, &c, ui.ctx(), self.filters.instrument, self.filters.difficulty));
+                self.open_preview(&c, ui.ctx());
             }
 
             ui.add_space(10.0);
@@ -3203,6 +3378,10 @@ impl App {
             if !c.uploaded().is_empty() {
                 info(ui, &t("📅  Uploaded"), &c.uploaded(), ui.visuals().text_color(), None);
             }
+            if let Some(rv) = &c.rv {
+                let kind = if rv.format.starts_with("rb") { t("Rock Band song (converted when downloaded)") } else { t("Clone Hero chart") };
+                info(ui, &t("📦  File"), &kind, ui.visuals().text_color(), None);
+            }
             ui.spacing_mut().item_spacing.y = gap;
 
             ui.add_space(12.0);
@@ -3246,19 +3425,23 @@ impl App {
             });
 
             ui.spacing_mut().item_spacing.y = 6.0;
-            self.scores.show(ui, &c, self.filters.difficulty.unwrap_or(0));
-            ui.add_space(10.0);
-            section(ui, "features", &t("Features"), None, |ui| {
-                crate::theme::hrow_wrapped(ui, |ui| {
-                    let any = feature_tags(ui, &c, true, &mut nav);
-                    if !any {
-                        ui.weak(t("None"));
-                    }
+            // Optimal scores, features and leaderboards come from the notes, which only Encore's
+            // charts have to hand.
+            if c.on_encore() {
+                self.scores.show(ui, &c, self.filters.difficulty.unwrap_or(0));
+                ui.add_space(10.0);
+                section(ui, "features", &t("Features"), None, |ui| {
+                    crate::theme::hrow_wrapped(ui, |ui| {
+                        let any = feature_tags(ui, &c, true, &mut nav);
+                        if !any {
+                            ui.weak(t("None"));
+                        }
+                    });
                 });
-            });
 
-            ui.add_space(12.0);
-            self.leaderboard.show(ui, &c, self.filters.instrument, self.filters.difficulty);
+                ui.add_space(12.0);
+                self.leaderboard.show(ui, &c, self.filters.instrument, self.filters.difficulty);
+            }
 
             ui.add_space(8.0);
             if let Some(nav) = nav {
@@ -4390,7 +4573,15 @@ fn row_context_menu(ui: &mut egui::Ui, c: &Chart, i: usize, checked: bool, downl
     } else {
         pick(ui, "download", &t("⬇  Download"), RowAction::Download(i));
     }
-    pick(ui, "play", &t("▶  Preview"), RowAction::Preview(i));
+    match &c.rv {
+        None => pick(ui, "play", &t("▶  Preview"), RowAction::Preview(i)),
+        Some(rv) => {
+            if ui.add(menu_item(ui, "link", &t("🌐  Open on RhythmVerse"))).clicked() {
+                ui.ctx().open_url(egui::OpenUrl::new_tab(rhythmverse::page(rv)));
+                ui.close();
+            }
+        }
+    }
     if checked {
         pick(ui, "square", &t("☐  Deselect"), RowAction::Toggle(i));
     } else {
@@ -4402,7 +4593,9 @@ fn row_context_menu(ui: &mut egui::Ui, c: &Chart, i: usize, checked: bool, downl
         pick(ui, "star", &t("⭐  Add to favourites"), RowAction::Favourite(i));
     }
     // Submenus show a caret.
-    egui::containers::menu::SubMenuButton::from_button(menu_item(ui, "link", &t("🔗  Copy link")).right_text("⏵")).ui(ui, |ui| copy_link_items(ui, &c.md5));
+    if c.on_encore() {
+        egui::containers::menu::SubMenuButton::from_button(menu_item(ui, "link", &t("🔗  Copy link")).right_text("⏵")).ui(ui, |ui| copy_link_items(ui, &c.md5));
+    }
     ui.separator();
     egui::containers::menu::SubMenuButton::from_button(menu_item(ui, "copy", &t("📋  Copy")).right_text("⏵")).ui(ui, |ui| {
         let mut items = vec![(n("\"Artist - Song (Charter)\""), c.title())];
@@ -4411,7 +4604,10 @@ fn row_context_menu(ui: &mut egui::Ui, c: &Chart, i: usize, checked: bool, downl
                 items.push((label, v.clone()));
             }
         }
-        items.push(("MD5", c.md5.clone()));
+        match &c.rv {
+            Some(rv) => items.push((n("RhythmVerse link"), rhythmverse::page(rv))),
+            None => items.push(("MD5", c.md5.clone())),
+        }
         for (label, value) in items {
             if ui.button(t(label)).clicked() {
                 ui.ctx().copy_text(value);
@@ -4426,6 +4622,34 @@ fn row_context_menu(ui: &mut egui::Ui, c: &Chart, i: usize, checked: bool, downl
         pick(ui, "pencil", &t("🔍  More by this charter"), RowAction::Nav(Nav::Text(5, ch.clone(), false)));
     }
 }
+
+/// Merges two lists that are each newest first (by when the chart last changed) into one.
+fn newest_first(a: Vec<Chart>, b: Vec<Chart>) -> Vec<Chart> {
+    let mut out = Vec::with_capacity(a.len() + b.len());
+    let (mut a, mut b) = (a.into_iter().peekable(), b.into_iter().peekable());
+    loop {
+        let take_b = match (a.peek(), b.peek()) {
+            (Some(x), Some(y)) => y.modified > x.modified,
+            (Some(_), None) => false,
+            (None, Some(_)) => true,
+            (None, None) => return out,
+        };
+        out.extend(if take_b { b.next() } else { a.next() });
+    }
+}
+
+/// The small tag on RhythmVerse's charts in the results, saying what kind of file it is.
+fn rv_badge(ui: &mut egui::Ui, rv: &api::RvFile) {
+    let (label, tip) = if rv.format.starts_with("rb") {
+        ("RB", t("From RhythmVerse: a Rock Band song, converted for Clone Hero when it's downloaded"))
+    } else {
+        ("RV", t("From RhythmVerse"))
+    };
+    theme::tag(ui, label, RV_COLOR).on_hover_text(tip);
+}
+
+/// RhythmVerse's colour, for its tags.
+const RV_COLOR: Color32 = Color32::from_rgb(178, 102, 230);
 
 /// A right-click menu that copies one or more values.
 fn copy_menu(resp: &egui::Response, items: &[(&str, String)]) {
@@ -4616,7 +4840,7 @@ fn nav_arrow(ui: &mut egui::Ui, left: bool, enabled: bool) -> egui::Response {
 
 /// Orders the song list can be in (the order menu and the Default order setting).
 const SORTS: [(SortKey, &str); 9] = [
-    (SortKey::Newest, n("Newest on Encore")),
+    (SortKey::Newest, n("Newest")),
     (SortKey::Popular, n("Most played on Clone Hero")),
     (SortKey::Uploaded, n("Recently updated")),
     (SortKey::Name, n("Name")),
@@ -4993,6 +5217,9 @@ impl eframe::App for App {
             self.toast = Some((text, link, Instant::now()));
         }
         self.show_toast(&ctx);
+        if let Some(url) = self.open_url.take() {
+            ctx.open_url(egui::OpenUrl::new_tab(url));
+        }
         if let Some(q) = ctx.data_mut(|d| d.remove_temp::<String>(players::search_request_id())) {
             // A fresh search: just this text, every other filter cleared (the order stays). A
             // chart's MD5 (New on Encore) also opens its details, like a shared link.
