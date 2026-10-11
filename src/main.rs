@@ -113,6 +113,17 @@ fn main() -> eframe::Result {
     eframe::run_native("Rainbow", options, Box::new(move |cc| Ok(Box::new(App::new(&cc.egui_ctx, link)))))
 }
 
+/// The web version's folder picker. A chosen folder's download list is read in, so charts the
+/// desktop app (or another browser) saved there count as downloaded. Returns the folder's name.
+#[cfg(target_arch = "wasm32")]
+async fn choose_folder(manifest: &Mutex<Manifest>) -> Option<String> {
+    let name = web::pick_folder().await?;
+    if let Some(list) = web::folder_read(api::MANIFEST_NAME).await {
+        manifest.lock().unwrap().merge(&String::from_utf8_lossy(&list));
+    }
+    Some(name)
+}
+
 /// Updates (or builds) the catalogue in `file`, printing progress.
 #[cfg(not(target_arch = "wasm32"))]
 fn update_catalogue_file(file: &std::path::Path) -> anyhow::Result<()> {
@@ -175,6 +186,9 @@ enum Msg {
     /// didn't start (it's kept, to resume after the next click).
     #[cfg(target_arch = "wasm32")]
     FolderBlocked,
+    /// The folder picker was closed without choosing one, so the download didn't start.
+    #[cfg(target_arch = "wasm32")]
+    FolderCancelled,
 }
 
 enum CatStatus {
@@ -1089,10 +1103,19 @@ impl App {
         task::spawn(move || async move {
             // The web version asks to save into the songs folder now, while the click still counts
             // (browsers only show the question just after one).
+            // With no folder chosen yet, it asks where to save (in browsers that can save into one).
             #[cfg(target_arch = "wasm32")]
-            if web::folder_name().is_some() && !web::folder_allowed().await {
-                let _ = w.tx.send(Msg::FolderBlocked);
-                return;
+            if web::has_folder_api() {
+                if web::folder_name().is_none() {
+                    let Some(name) = choose_folder(&w.manifest).await else {
+                        let _ = w.tx.send(Msg::FolderCancelled);
+                        return;
+                    };
+                    let _ = w.tx.send(Msg::Log(format!("Saving charts to the folder {name}")));
+                } else if !web::folder_allowed().await {
+                    let _ = w.tx.send(Msg::FolderBlocked);
+                    return;
+                }
             }
             // Already-downloaded charts are skipped, so resuming just runs the same list again.
             let pending = Pending { title, charts };
@@ -1216,6 +1239,11 @@ impl App {
                         None,
                         Instant::now(),
                     ));
+                }
+                #[cfg(target_arch = "wasm32")]
+                Msg::FolderCancelled => {
+                    self.job = None;
+                    self.log("No folder chosen, so nothing was downloaded".to_owned());
                 }
                 #[cfg(target_arch = "wasm32")]
                 Msg::FontReady => {
@@ -3515,11 +3543,9 @@ impl App {
     fn pick_folder(&mut self) {
         let (tx, manifest) = (self.tx.clone(), self.manifest.clone());
         task::spawn(move || async move {
-            let Some(name) = web::pick_folder().await else { return };
-            if let Some(list) = web::folder_read(api::MANIFEST_NAME).await {
-                manifest.lock().unwrap().merge(&String::from_utf8_lossy(&list));
+            if let Some(name) = choose_folder(&manifest).await {
+                let _ = tx.send(Msg::Log(format!("Saving charts to the folder {name}")));
             }
-            let _ = tx.send(Msg::Log(format!("Saving charts to the folder {name}")));
         });
     }
 
@@ -3722,11 +3748,11 @@ fn library_card(ui: &mut egui::Ui, s: &mut Settings, width: f32, busy: bool, exa
                 if ui.add_enabled(!busy, theme::primary(t("Choose…")).min_size(vec2(0.0, 32.0))).clicked() {
                     actions.pick_folder = true;
                 }
-                if folder.is_some() && ui.add_enabled(!busy, egui::Button::new(RichText::new(t("✖ Forget")).size(14.5)).min_size(vec2(0.0, 32.0))).on_hover_text(t("Save charts as ordinary downloads instead")).clicked() {
+                if folder.is_some() && ui.add_enabled(!busy, egui::Button::new(RichText::new(t("✖ Forget")).size(14.5)).min_size(vec2(0.0, 32.0))).on_hover_text(t("Choose again on the next download")).clicked() {
                     actions.forget_folder = true;
                 }
             });
-            folder_box(ui, &folder.unwrap_or_else(|| t("None chosen: charts are saved as ordinary downloads")));
+            folder_box(ui, &folder.unwrap_or_else(|| t("None chosen yet: Rainbow asks where to save on your first download")));
         } else {
             setting_row(ui, &t("Songs folder"), &t("This browser saves charts as ordinary downloads (always as .sng files). In Chrome or Edge, Rainbow can save straight into your songs folder."), |_| {});
         }

@@ -596,11 +596,11 @@
     "🔍  Search the web": "🔍  Web'de ara",
     "✔  Downloaded": "✔  İndirildi",
     "✖ Forget": "✖ Unut",
-    "Save charts as ordinary downloads instead": "Chart'ları bunun yerine normal indirmeler olarak kaydet",
-    "None chosen: charts are saved as ordinary downloads": "Seçilmedi: chart'lar normal indirmeler olarak kaydedilir",
     "Point this at your Clone Hero or YARG songs folder. The browser asks once each visit before Rainbow saves into it.": "Clone Hero veya YARG şarkı klasörünü seç. Rainbow kaydetmeden önce tarayıcı her ziyarette bir kez sorar.",
     "This browser saves charts as ordinary downloads (always as .sng files). In Chrome or Edge, Rainbow can save straight into your songs folder.": "Bu tarayıcı chart'ları normal indirmeler olarak kaydeder (her zaman .sng dosyası olarak). Chrome veya Edge'de Rainbow doğrudan şarkı klasörüne kaydedebilir.",
     "Rainbow needs your permission to save into {folder}. Click Download again and choose Allow.": "Rainbow'un {folder} klasörüne kaydetmek için iznine ihtiyacı var. İndir'e tekrar tıkla ve İzin ver'i seç.",
-    "The web version saves .sng files, one per chart, which Clone Hero and YARG read directly. (Browsers don't allow the song.ini file a chart folder needs.)": "Web sürümü chart başına bir .sng dosyası kaydeder; Clone Hero ve YARG bunları doğrudan okur. (Tarayıcılar, chart klasörünün ihtiyaç duyduğu song.ini dosyasına izin vermez.)"
+    "The web version saves .sng files, one per chart, which Clone Hero and YARG read directly. (Browsers don't allow the song.ini file a chart folder needs.)": "Web sürümü chart başına bir .sng dosyası kaydeder; Clone Hero ve YARG bunları doğrudan okur. (Tarayıcılar, chart klasörünün ihtiyaç duyduğu song.ini dosyasına izin vermez.)",
+    "None chosen yet: Rainbow asks where to save on your first download": "Henüz seçilmedi: Rainbow ilk indirmede nereye kaydedeceğini sorar",
+    "Choose again on the next download": "Sonraki indirmede yeniden seç"
   }
 }

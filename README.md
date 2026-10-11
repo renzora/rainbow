@@ -62,7 +62,8 @@ The same app, compiled to WebAssembly, at <https://renzora.github.io/rainbow/>. 
 everything the desktop app has except updating itself, `rainbow://` links, and importing zips
 and Rock Band songs. Differences:
 
-- **Downloads:** in Chrome and Edge you choose your songs folder once (Settings → Chart library)
+- **Downloads:** in Chrome and Edge you choose your songs folder once (Settings → Chart library,
+  or the first time you download)
   and charts are saved straight into it as `.sng` files (browsers won't create the `song.ini` a
   chart folder needs); the browser asks for permission once per visit. Other
   browsers save each chart as an ordinary download (a `.sng` file).

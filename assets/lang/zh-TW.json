@@ -596,11 +596,11 @@
     "🔍  Search the web": "🔍  在網路上搜尋",
     "✔  Downloaded": "✔  已下載",
     "✖ Forget": "✖ 取消",
-    "Save charts as ordinary downloads instead": "改為以一般下載儲存譜面",
-    "None chosen: charts are saved as ordinary downloads": "未選擇：譜面以一般下載儲存",
     "Point this at your Clone Hero or YARG songs folder. The browser asks once each visit before Rainbow saves into it.": "指向你的 Clone Hero 或 YARG 歌曲資料夾。每次造訪時，瀏覽器會在 Rainbow 儲存前詢問一次。",
     "This browser saves charts as ordinary downloads (always as .sng files). In Chrome or Edge, Rainbow can save straight into your songs folder.": "此瀏覽器以一般下載儲存譜面（一律為 .sng 檔案）。在 Chrome 或 Edge 中，Rainbow 可直接儲存到歌曲資料夾。",
     "Rainbow needs your permission to save into {folder}. Click Download again and choose Allow.": "Rainbow 需要你的許可才能儲存到 {folder}。請再次點擊下載並選擇「允許」。",
-    "The web version saves .sng files, one per chart, which Clone Hero and YARG read directly. (Browsers don't allow the song.ini file a chart folder needs.)": "網頁版為每個譜面儲存一個 .sng 檔案，Clone Hero 和 YARG 可直接讀取。（瀏覽器不允許建立譜面資料夾所需的 song.ini 檔案。）"
+    "The web version saves .sng files, one per chart, which Clone Hero and YARG read directly. (Browsers don't allow the song.ini file a chart folder needs.)": "網頁版為每個譜面儲存一個 .sng 檔案，Clone Hero 和 YARG 可直接讀取。（瀏覽器不允許建立譜面資料夾所需的 song.ini 檔案。）",
+    "None chosen yet: Rainbow asks where to save on your first download": "尚未選擇：首次下載時 Rainbow 會詢問儲存位置",
+    "Choose again on the next download": "下次下載時重新選擇"
   }
 }

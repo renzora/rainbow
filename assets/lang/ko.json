@@ -596,11 +596,11 @@
     "🔍  Search the web": "🔍  웹에서 검색",
     "✔  Downloaded": "✔  다운로드됨",
     "✖ Forget": "✖ 해제",
-    "Save charts as ordinary downloads instead": "대신 일반 다운로드로 저장",
-    "None chosen: charts are saved as ordinary downloads": "선택 안 함: 차트가 일반 다운로드로 저장됩니다",
     "Point this at your Clone Hero or YARG songs folder. The browser asks once each visit before Rainbow saves into it.": "Clone Hero 또는 YARG 곡 폴더를 지정하세요. Rainbow가 저장하기 전에 브라우저가 방문할 때마다 한 번 묻습니다.",
     "This browser saves charts as ordinary downloads (always as .sng files). In Chrome or Edge, Rainbow can save straight into your songs folder.": "이 브라우저는 차트를 일반 다운로드(항상 .sng 파일)로 저장합니다. Chrome이나 Edge에서는 곡 폴더에 바로 저장할 수 있습니다.",
     "Rainbow needs your permission to save into {folder}. Click Download again and choose Allow.": "{folder}에 저장하려면 권한이 필요합니다. 다운로드를 다시 클릭하고 허용을 선택하세요.",
-    "The web version saves .sng files, one per chart, which Clone Hero and YARG read directly. (Browsers don't allow the song.ini file a chart folder needs.)": "웹 버전은 차트마다 .sng 파일 하나를 저장하며, Clone Hero와 YARG가 바로 읽습니다. (브라우저는 차트 폴더에 필요한 song.ini 파일을 허용하지 않습니다.)"
+    "The web version saves .sng files, one per chart, which Clone Hero and YARG read directly. (Browsers don't allow the song.ini file a chart folder needs.)": "웹 버전은 차트마다 .sng 파일 하나를 저장하며, Clone Hero와 YARG가 바로 읽습니다. (브라우저는 차트 폴더에 필요한 song.ini 파일을 허용하지 않습니다.)",
+    "None chosen yet: Rainbow asks where to save on your first download": "아직 선택 안 함: 첫 다운로드 때 저장할 위치를 묻습니다",
+    "Choose again on the next download": "다음 다운로드 때 다시 선택"
   }
 }

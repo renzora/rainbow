@@ -66,10 +66,11 @@ export function folder_name() {
   return folder ? folder.name : null;
 }
 
-// Asks for a folder; resolves to its name, or null if cancelled.
+// Asks for a folder (starting in the last one chosen, or Downloads); resolves to its name, or
+// null if cancelled.
 export async function pick_folder() {
   try {
-    const handle = await window.showDirectoryPicker({ id: "songs", mode: "readwrite" });
+    const handle = await window.showDirectoryPicker({ id: "songs", mode: "readwrite", startIn: folder || "downloads" });
     folder = handle;
     (await store(HANDLES, "readwrite")).put(handle, "songs");
     return handle.name;
