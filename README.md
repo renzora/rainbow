@@ -68,7 +68,9 @@ and Rock Band songs. Differences:
   chart folder needs); the browser asks for permission once per visit. Other
   browsers save each chart as an ordinary download (a `.sng` file).
 - **Catalogue:** a copy of Encore's whole chart list is published with the page and refreshed
-  daily, so it's ready in seconds; Rainbow then fetches anything newer from Encore.
+  hourly, so it's ready in seconds. While it's open, Rainbow checks for newer charts every five
+  minutes, shared between all visitors through the proxy below (so Encore is asked at most once
+  every five minutes, however many people are using it).
 - **Clone Hero leaderboards** need a small proxy, because Clone Hero's API only answers its own
   website; see [`tools/clonehero-proxy`](tools/clonehero-proxy). Without it, the Players and
   Leaderboards tabs are left out.
@@ -84,7 +86,7 @@ python -m http.server 8765 -d dist    # then open http://localhost:8765
 ```
 
 `.github/workflows/web.yml` builds it and publishes it to GitHub Pages on every push to `main`
-(and daily, for the catalogue). The repository's Pages source must be set to **GitHub Actions**.
+(and hourly, for the catalogue; the app itself is only rebuilt when its code changes). The repository's Pages source must be set to **GitHub Actions**.
 
 ## Translations
 

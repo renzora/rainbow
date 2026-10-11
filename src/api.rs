@@ -403,6 +403,26 @@ impl Client {
         self.post_search("/search", &body).await
     }
 
+    /// A page of every chart, newest first, for catalogue updates. The web version gets the first
+    /// page from the proxy (tools/clonehero-proxy), which keeps it for a few minutes, so all its
+    /// visitors share one request to Encore; it falls back to asking Encore itself.
+    pub async fn newest(&self, page: u32) -> Result<SearchPage> {
+        #[cfg(target_arch = "wasm32")]
+        if page == 1
+            && let Some(root) = crate::players::proxy_root()
+        {
+            let url = format!("{root}/encore/newest");
+            let shared = async {
+                let raw: RawPage = self.http.get(&url).timeout(Duration::from_secs(30)).send().await?.error_for_status()?.json().await?;
+                anyhow::Ok(SearchPage { found: raw.found, charts: raw.data.iter().filter_map(Chart::from_api).collect() })
+            };
+            if let Ok(page) = shared.await {
+                return Ok(page);
+            }
+        }
+        self.search("*", page, None, None).await
+    }
+
     /// Charts with this md5 or chart hash, straight from Encore (for ones newer than the catalogue).
     pub async fn find_by_hash(&self, hash: &str) -> Result<Vec<Chart>> {
         let body =

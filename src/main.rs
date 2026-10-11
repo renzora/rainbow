@@ -74,8 +74,9 @@ const MAX_LOG: usize = 500;
 const BULK: usize = 50;
 /// While the catalogue is incomplete, ask Encore directly once typing pauses this long.
 const LIVE_SEARCH_DEBOUNCE: Duration = Duration::from_millis(350);
-/// The web version has no refresh button; it checks Encore for new charts this often instead.
-const AUTO_REFRESH: Duration = Duration::from_secs(30 * 60);
+/// The web version has no refresh button; it checks for new charts this often instead (through
+/// the proxy, which asks Encore at most once in this time for everyone; see Client::newest).
+const AUTO_REFRESH: Duration = Duration::from_secs(5 * 60);
 const LOGO_PNG: &[u8] = include_bytes!("../assets/icon-256.png");
 const RENZORA_PNG: &[u8] = include_bytes!("../assets/renzora.png");
 const RENZORA_URL: &str = "https://github.com/renzora";
@@ -558,7 +559,7 @@ impl App {
                 app.replace_charts(cat.charts);
                 // Only ask Encore for new charts if the catalogue is old enough (or unfinished).
                 let stale = match app.settings.refresh_after_hours {
-                    // The web version always checks, at most every half hour (see auto_refresh).
+                    // The web version always checks, at most every few minutes (see auto_refresh).
                     _ if cfg!(target_arch = "wasm32") => now().saturating_sub(app.cat_updated) >= AUTO_REFRESH.as_secs(),
                     Some(h) => now().saturating_sub(app.cat_updated) >= h as u64 * 3600,
                     None => false,
@@ -725,8 +726,8 @@ impl App {
         });
     }
 
-    /// The web version checks Encore for new charts every half hour while it's open (in place of
-    /// the desktop's refresh button), and tries again that long after a failure.
+    /// The web version checks for new charts every few minutes while it's open (in place of the
+    /// desktop's refresh button), and tries again that long after a failure.
     fn auto_refresh(&mut self, ctx: &egui::Context) {
         if !cfg!(target_arch = "wasm32") || matches!(self.cat_status, CatStatus::Building { .. }) {
             return;

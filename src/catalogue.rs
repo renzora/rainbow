@@ -131,7 +131,7 @@ impl Catalogue {
                 if stop.load(Ordering::Relaxed) {
                     return Ok(0);
                 }
-                let resp = client.search("*", page, None, None).await?;
+                let resp = client.newest(page).await?;
                 let pages = resp.found.div_ceil(MAX_PER_PAGE as u64) as u32;
                 let fresh: Vec<Chart> = resp.charts.into_iter().filter(|c| known.insert(c.md5.clone())).collect();
                 let charts = before + new.len() + fresh.len();

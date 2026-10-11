@@ -2,13 +2,13 @@ name: Web
 
 # Builds the web version and publishes it to GitHub Pages (https://renzora.github.io/rainbow/),
 # with a fresh copy of the Encore catalogue so visitors don't have to fetch it page by page.
-# The schedule refreshes that copy daily.
+# The schedule refreshes that copy hourly; the app itself is only rebuilt when its code changes.
 
 on:
   push:
     branches: [main]
   schedule:
-    - cron: "17 5 * * *"
+    - cron: "17 * * * *"
   workflow_dispatch:
 
 permissions:
@@ -38,11 +38,20 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
+      # The built web app, reused while its code (and the proxy address) stay the same.
+      - name: Previous web build
+        id: web-build
+        uses: actions/cache@v4
+        with:
+          path: dist
+          key: web-${{ hashFiles('src/**', 'web/**', 'assets/**', 'docs/**', 'Cargo.toml', 'Cargo.lock', 'tools/build_web.sh') }}-${{ vars.CH_PROXY }}
       - name: wasm-bindgen (the version in Cargo.lock)
+        if: steps.web-build.outputs.cache-hit != 'true'
         run: |
           VERSION=$(grep -A1 '^name = "wasm-bindgen"$' Cargo.lock | sed -n 's/^version = "\(.*\)"$/\1/p')
           cargo install wasm-bindgen-cli --version "$VERSION" --locked
       - name: Web version
+        if: steps.web-build.outputs.cache-hit != 'true'
         env:
           # The Clone Hero proxy (tools/clonehero-proxy); without it the leaderboards are left out.
           RAINBOW_CH_PROXY: ${{ vars.CH_PROXY }}

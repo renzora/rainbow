@@ -31,6 +31,12 @@ const API_URL: Option<&str> = Some("https://api.clonehero.net/v1");
 #[cfg(target_arch = "wasm32")]
 const API_URL: Option<&str> = option_env!("RAINBOW_CH_PROXY");
 
+/// The web version's proxy (without the API's `/v1`), if it has one.
+#[cfg(target_arch = "wasm32")]
+pub fn proxy_root() -> Option<&'static str> {
+    API_URL.filter(|u| !u.is_empty()).and_then(|u| u.strip_suffix("/v1"))
+}
+
 /// Whether the leaderboards can be reached (always on the desktop).
 pub fn available() -> bool {
     API_URL.is_some_and(|u| !u.is_empty())
