@@ -33,8 +33,7 @@ It also runs in your browser, nothing to install: **<https://renzora.github.io/r
 - **Rock Band song conversion**: drop Rock Band CON files (e.g. from RhythmVerse) onto the
   window, or put them in your songs folder, and Rainbow turns them into Clone Hero charts:
   `song.ini` from `songs.dta`, `notes.mid`, `album.png`, and the multitrack audio split into
-  per-instrument Ogg Vorbis stems. It's a quick path for unencrypted customs only: encrypted
-  official DLC can't be converted. For anything beyond the basics, use
+  per-instrument Ogg Vorbis stems. For anything beyond the basics, use
   [Nautilus](https://github.com/NemosNautilus/Nautilus).
 - **Chart preview**: watch any chart's notes fall down a highway before downloading it.
 - **Clone Hero leaderboards**: a song's details show its top scores on the
