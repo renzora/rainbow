@@ -142,6 +142,14 @@ Rainbow is not affiliated with Chorus Encore, Bridge or Clone Hero.
 
 Created by [Renzora Studios](https://github.com/renzora).
 
+Rainbow wouldn't exist without [Chorus Encore](https://www.enchor.us): every chart you search,
+preview and download comes from its library, API and file hosting. Thank you to everyone who runs
+it and keeps it free. The leaderboard track hashes follow
+[scan-chart](https://github.com/Geomitron/scan-chart).
+
+The optimal scores in a song's details were inspired by [CHOpt](https://github.com/GenericMadScientist/CHOpt) by
+GenericMadScientist, the go-to tool for finding the best star power paths in Clone Hero.
+
 Big thanks to [Nautilus](https://github.com/NemosNautilus/Nautilus) by NemosNautilus, the Rock
 Band tool suite the community has relied on since 2013. Rainbow's song conversion only covers the
 basics; Nautilus does far more, and it's well worth supporting.
