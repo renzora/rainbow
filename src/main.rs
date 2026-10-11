@@ -65,7 +65,9 @@ pub(crate) const fn n(s: &'static str) -> &'static str {
 use catalogue::Catalogue;
 use covers::Covers;
 use filter::{Filters, Index, Range, SortKey, TEXT_FIELDS, TOGGLES};
-use settings::{Density, DownloadFormat, Settings};
+#[cfg(not(target_arch = "wasm32"))]
+use settings::DownloadFormat;
+use settings::{Density, Settings};
 
 const MAX_LOG: usize = 500;
 /// Downloads bigger than this ask for confirmation and use the polite delay.
