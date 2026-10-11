@@ -38,19 +38,19 @@ fn name(path: &Path) -> String {
     path.file_name().unwrap_or_default().to_string_lossy().into_owned()
 }
 
-/// Converts one CON package into the songs folder, reporting the result. Returns the folders.
-fn convert_one(path: &Path, songs_dir: &Path, opts: &Options, report: &dyn Fn(String)) -> Vec<PathBuf> {
+/// Converts one CON package into the songs folder, reporting the result.
+fn convert_one(path: &Path, songs_dir: &Path, opts: &Options, report: &dyn Fn(String)) -> bool {
     report(format!("Converting {}…", name(path)));
-    match rockband::convert(path, songs_dir, &opts.folder_template, None) {
+    match rockband::convert(path, songs_dir, &opts.folder_template) {
         Ok(dirs) => {
-            for d in &dirs {
+            for d in dirs {
                 report(format!("Converted {} to {}", name(path), d.display()));
             }
-            dirs
+            true
         }
         Err(e) => {
             report(format!("Couldn't convert {}: {e:#}", name(path)));
-            Vec::new()
+            false
         }
     }
 }
@@ -83,19 +83,16 @@ fn remove_empty_dirs(dir: &Path) -> bool {
     empty && fs::remove_dir(dir).is_ok()
 }
 
-/// Converts CON files found in a folder we just extracted, then tidies up after them. Returns
-/// the converted songs' folders.
-pub fn convert_extracted(folder: &Path, songs_dir: &Path, opts: &Options, report: &dyn Fn(String)) -> Vec<PathBuf> {
+/// Converts CON files found in a folder we just extracted, then tidies up after them.
+fn convert_extracted(folder: &Path, songs_dir: &Path, opts: &Options, report: &dyn Fn(String)) {
     let mut cons = Vec::new();
     find_cons(folder, 4, &mut cons);
-    let mut out = Vec::new();
     for path in cons {
-        out.extend(convert_one(&path, songs_dir, opts, report));
+        convert_one(&path, songs_dir, opts, report);
         // The CON was our own extracted copy; the zip itself is kept or deleted separately.
         let _ = fs::remove_file(&path);
     }
     remove_empty_dirs(folder);
-    out
 }
 
 /// One pass over the top level of the songs folder.

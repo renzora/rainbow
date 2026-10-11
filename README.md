@@ -3,7 +3,7 @@
 # Rainbow
 
 A fast desktop app for searching and downloading Clone Hero / YARG charts from
-[Chorus Encore](https://www.enchor.us) and [RhythmVerse](https://rhythmverse.co). It's a lightweight alternative to
+[Chorus Encore](https://www.enchor.us). It's a lightweight alternative to
 [Bridge](https://github.com/Geomitron/Bridge), written in Rust.
 
 It also runs in your browser, nothing to install: **<https://renzora.github.io/rainbow/>**
@@ -13,15 +13,9 @@ It also runs in your browser, nothing to install: **<https://renzora.github.io/r
 
 ## Features
 
-- **Instant search** across Encore's whole library (~95k charts) and RhythmVerse's (~140k
-  Clone Hero charts and Rock Band songs), together in one list. Rainbow keeps a local
+- **Instant search** across Encore's whole library (~95k charts). Rainbow keeps a local
   catalogue of chart metadata, so results update as you type; it only fetches what's new on
   later launches.
-- **RhythmVerse charts** show with an **RV** tag (**RB** for Rock Band songs), and a picker
-  shows Encore's, RhythmVerse's or both. Downloading one unpacks its .zip or .7z into your
-  songs folder, or converts a Rock Band song (see below). Charts whose files are on other
-  sites (Mega, Google Drive folders, .rar files) open on RhythmVerse instead. RhythmVerse
-  doesn't share charts' notes, so its charts have no preview, optimal score or leaderboards.
 - **Advanced search** like Bridge's: per-field name/artist/album/genre/year/charter filters
   with *Exact* and *Exclude*, length, intensity, average/max NPS, year range, modified-after
   date, MD5 hash, track hash, and any/yes/no toggles for forced/open/tap notes, solos,
@@ -74,12 +68,8 @@ and Rock Band songs. Differences:
   and charts are saved straight into it as `.sng` files (browsers won't create the `song.ini` a
   chart folder needs); the browser asks for permission once per visit. Other
   browsers save each chart as an ordinary download (a `.sng` file).
-- **RhythmVerse:** its charts are listed and searchable, but RhythmVerse doesn't let other
-  websites download its files (or show its album covers), so they open on RhythmVerse to
-  download there.
-- **Catalogue:** copies of Encore's and RhythmVerse's chart lists are published with the page
-  and refreshed hourly (see [Shared chart lists](#shared-chart-lists)), so they're ready in
-  seconds. While it's open, Rainbow checks for newer charts every five
+- **Catalogue:** a copy of Encore's whole chart list is published with the page and refreshed
+  hourly, so it's ready in seconds. While it's open, Rainbow checks for newer charts every five
   minutes, shared between all visitors through the proxy below (so Encore is asked at most once
   every five minutes, however many people are using it).
 - **Clone Hero leaderboards** need a small proxy, because Clone Hero's API only answers its own
@@ -97,21 +87,7 @@ python -m http.server 8765 -d dist    # then open http://localhost:8765
 ```
 
 `.github/workflows/web.yml` builds it and publishes it to GitHub Pages on every push to `main`
-(and hourly, for the chart lists; the app itself is only rebuilt when its code changes). The repository's Pages source must be set to **GitHub Actions**.
-
-## Shared chart lists
-
-Rather than every copy of Rainbow fetching Encore's and RhythmVerse's whole chart lists, the
-same workflow keeps copies of both and publishes them with the web version:
-
-- `catalogue.json`: Encore's charts, brought up to date hourly.
-- `rhythmverse.json`: RhythmVerse's charts, fetched in full once a week and brought up to date
-  hourly, and `rhythmverse-recent.json`, just the last few days' changes.
-
-The desktop app and the web version start from these, then fetch only what's new (Encore's
-newest charts from Encore, RhythmVerse's from `rhythmverse-recent.json`), so Encore and
-RhythmVerse each see a handful of requests however many people use Rainbow. Downloading a
-chart still comes from Encore or RhythmVerse (or wherever its file is).
+(and hourly, for the catalogue; the app itself is only rebuilt when its code changes). The repository's Pages source must be set to **GitHub Actions**.
 
 ## Translations
 

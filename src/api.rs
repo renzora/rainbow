@@ -113,40 +113,18 @@ pub struct Chart {
     pub drive_folder: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub drive_root: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub length_ms: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub effective_ms: Option<f64>,
     /// Difficulty ("intensity") per instrument, in `INSTRUMENTS` order; -1 = none.
     pub diffs: [i8; 10],
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default)]
     pub notes: Vec<NoteStat>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub drum_type: Option<u8>,
-    #[serde(default, skip_serializing_if = "is_zero")]
+    #[serde(default)]
     pub flags: u16,
-    /// Set for charts from RhythmVerse rather than Encore (their `md5` is then "rv-<file id>").
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub rv: Option<RvFile>,
-}
-
-fn is_zero(n: &u16) -> bool {
-    *n == 0
-}
-
-/// Where a RhythmVerse chart's file is (see rhythmverse.rs).
-#[derive(Serialize, Deserialize, Clone, Default, PartialEq)]
-pub struct RvFile {
-    /// RhythmVerse's id for the file.
-    pub id: String,
-    /// Its format: "ch" or "rv" (a chart folder in a .zip or .7z), "rb3xbox" (a Rock Band CON
-    /// file, converted after downloading)…
-    pub format: String,
-    /// The download: a path on rhythmverse.co, or a link to another site.
-    pub url: String,
-    /// The file's name, as uploaded.
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub file: String,
 }
 
 fn text(v: &Value, key: &str) -> Option<String> {
@@ -267,17 +245,11 @@ impl Chart {
             notes,
             drum_type: nd.get("drumType").and_then(Value::as_u64).map(|d| d as u8),
             flags,
-            rv: None,
         })
     }
 
     pub fn has(&self, f: u16) -> bool {
         self.flags & f != 0
-    }
-
-    /// From Encore, so it has a preview, optimal scores and leaderboards (which need its notes).
-    pub fn on_encore(&self) -> bool {
-        self.rv.is_none()
     }
 
     pub fn title(&self) -> String {
@@ -542,10 +514,6 @@ impl Client {
         use std::fs::{self, File};
         use std::io::Write;
 
-        if chart.rv.is_some() {
-            return crate::rhythmverse::download(chart, settings, progress).await;
-        }
-
         let novideo = chart.has(flag::VIDEO) && !settings.video;
         let url = format!("{FILES_URL}/{}{}.sng", chart.md5, if novideo { "_novideo" } else { "" });
 
@@ -598,9 +566,6 @@ impl Client {
     pub async fn download(&self, chart: &Chart, settings: &Settings, mut progress: impl FnMut(u64, Option<u64>)) -> Result<PathBuf> {
         use crate::web;
 
-        // (RhythmVerse's files can't be fetched from other sites' pages; see rhythmverse.rs.)
-        anyhow::ensure!(chart.on_encore(), "RhythmVerse charts can only be downloaded in the desktop app");
-
         let novideo = chart.has(flag::VIDEO) && !settings.video;
         let url = format!("{FILES_URL}/{}{}.sng", chart.md5, if novideo { "_novideo" } else { "" });
         let data = self
@@ -650,7 +615,7 @@ pub fn resolve_folder_name(template: &str, chart: &Chart) -> String {
         .split(['/', '\\'])
         .filter(|part| !part.trim().is_empty())
         .map(|part| {
-            tidy_name(
+            sanitize_filename(
                 &part
                     .replace("{name}", &get(&chart.name))
                     .replace("{artist}", &get(&chart.artist))
@@ -660,20 +625,8 @@ pub fn resolve_folder_name(template: &str, chart: &Chart) -> String {
                     .replace("{charter}", &get(&chart.charter)),
             )
         })
-        .filter(|part| !part.is_empty())
         .collect();
     if parts.is_empty() { chart.md5.clone() } else { parts.join("/") }
-}
-
-/// Tidies a folder name after blank fields were filled in: drops empty brackets ("()" from a
-/// missing charter), doubled spaces and a dangling " -".
-fn tidy_name(name: &str) -> String {
-    let mut s = name.replace("()", "").replace("[]", "");
-    while s.contains("  ") {
-        s = s.replace("  ", " ");
-    }
-    let s = s.trim().trim_end_matches(" -").trim_start_matches("- ").trim();
-    if s.is_empty() { String::new() } else { sanitize_filename(s) }
 }
 
 pub fn default_songs_dir() -> PathBuf {
@@ -830,19 +783,5 @@ impl Manifest {
             }
         }
         self.flush();
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn folder_names_skip_blank_fields() {
-        let chart = Chart { artist: Some("WANDS".into()), name: Some("Sekai".into()), md5: "x".into(), ..Default::default() };
-        assert_eq!(resolve_folder_name("{artist} - {name} ({charter})", &chart), "WANDS - Sekai");
-        assert_eq!(resolve_folder_name("{charter}/{artist} - {name}", &chart), "WANDS - Sekai");
-        let full = Chart { charter: Some("Nadir".into()), ..chart };
-        assert_eq!(resolve_folder_name("{artist} - {name} ({charter})", &full), "WANDS - Sekai (Nadir)");
     }
 }

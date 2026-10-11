@@ -1,9 +1,8 @@
 name: Web
 
 # Builds the web version and publishes it to GitHub Pages (https://renzora.github.io/rainbow/),
-# with fresh copies of the Encore and RhythmVerse chart lists, so nobody has to fetch them page by
-# page (the desktop app starts from them too).
-# The schedule refreshes those copies hourly; the app itself is only rebuilt when its code changes.
+# with a fresh copy of the Encore catalogue so visitors don't have to fetch it page by page.
+# The schedule refreshes that copy hourly; the app itself is only rebuilt when its code changes.
 
 on:
   push:
@@ -63,15 +62,6 @@ jobs:
           # Start from the published copy, so only new charts are fetched.
           curl -fsSL https://renzora.github.io/rainbow/catalogue.json -o dist/catalogue.json || rm -f dist/catalogue.json
           ./target/release/rainbow --update-catalogue dist/catalogue.json
-      # RhythmVerse's charts, shared the same way (see src/rhythmverse.rs): the whole list once a
-      # week, otherwise what changed since the last run. If RhythmVerse can't be reached, the
-      # copy that's already published stays.
-      - name: RhythmVerse
-        run: |
-          curl -fsSL https://renzora.github.io/rainbow/rhythmverse.json -o dist/rhythmverse.json || rm -f dist/rhythmverse.json
-          if ! ./target/release/rainbow --update-rhythmverse dist/rhythmverse.json; then
-            curl -fsSL https://renzora.github.io/rainbow/rhythmverse-recent.json -o dist/rhythmverse-recent.json || true
-          fi
       - uses: actions/upload-pages-artifact@v4
         with:
           path: dist

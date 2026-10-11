@@ -17,8 +17,7 @@ use crate::stfs::Stfs;
 pub use crate::stfs::is_package;
 
 /// Converts every song in the package into `<songs_dir>/<folder name>/`. Returns the folders.
-/// `charter` is used for songs whose songs.dta doesn't say who charted them.
-pub fn convert(package: &Path, songs_dir: &Path, folder_template: &str, charter: Option<&str>) -> Result<Vec<PathBuf>> {
+pub fn convert(package: &Path, songs_dir: &Path, folder_template: &str) -> Result<Vec<PathBuf>> {
     let pkg = Stfs::open(package)?;
     let dta_file = pkg.find("songs/songs.dta").context("no songs/songs.dta: not a Rock Band song package")?;
     let dta_bytes = pkg.read(dta_file)?;
@@ -32,11 +31,7 @@ pub fn convert(package: &Path, songs_dir: &Path, folder_template: &str, charter:
         bail!("songs.dta has no songs");
     }
     let mut out = Vec::new();
-    for mut song in songs {
-        if song.author.as_deref().is_none_or(|a| a.trim().is_empty()) {
-            song.author = charter.map(str::to_owned);
-        }
-        let song = &song;
+    for song in &songs {
         let dir = convert_song(&pkg, song, songs_dir, folder_template)
             .with_context(|| format!("{} - {}", song.artist, song.name))?;
         out.push(dir);
@@ -320,7 +315,7 @@ mod tests {
         let path = std::env::var("CON_SAMPLE").expect("set CON_SAMPLE");
         let out = std::env::var("CON_OUT").expect("set CON_OUT");
         std::fs::create_dir_all(&out).unwrap();
-        let dirs = super::convert(path.as_ref(), out.as_ref(), "{artist} - {name} ({charter})", None).unwrap();
+        let dirs = super::convert(path.as_ref(), out.as_ref(), "{artist} - {name} ({charter})").unwrap();
         for d in dirs {
             println!("converted to {}", d.display());
             for f in std::fs::read_dir(&d).unwrap().flatten() {

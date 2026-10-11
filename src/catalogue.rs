@@ -54,11 +54,6 @@ const APP_DIR: &str = if cfg!(target_os = "macos") { "Rainbow" } else { "rainbow
 /// Linux `$XDG_DATA_HOME/rainbow` (usually `~/.local/share/rainbow`).
 /// (On the web these are just names for keys in the browser's storage; see store.rs.)
 pub fn data_dir() -> PathBuf {
-    // (Debug builds can be pointed elsewhere, to try things without touching your own settings.)
-    #[cfg(all(debug_assertions, not(target_arch = "wasm32")))]
-    if let Some(dir) = std::env::var_os("RAINBOW_DATA_DIR") {
-        return PathBuf::from(dir);
-    }
     #[cfg(not(target_arch = "wasm32"))]
     return dirs::data_local_dir().unwrap_or_else(|| PathBuf::from(".")).join(APP_DIR);
     #[cfg(target_arch = "wasm32")]
@@ -69,10 +64,6 @@ pub fn data_dir() -> PathBuf {
 /// Windows `%LOCALAPPDATA%/rainbow`, macOS `~/Library/Caches/Rainbow`,
 /// Linux `$XDG_CACHE_HOME/rainbow` (usually `~/.cache/rainbow`).
 pub fn cache_dir() -> PathBuf {
-    #[cfg(all(debug_assertions, not(target_arch = "wasm32")))]
-    if let Some(dir) = std::env::var_os("RAINBOW_DATA_DIR") {
-        return PathBuf::from(dir).join("cache");
-    }
     #[cfg(not(target_arch = "wasm32"))]
     return dirs::cache_dir().unwrap_or_else(|| PathBuf::from(".")).join(APP_DIR);
     #[cfg(target_arch = "wasm32")]
@@ -110,16 +101,12 @@ impl Catalogue {
         Ok(())
     }
 
-    /// The copy of the whole catalogue published with the web version (refreshed hourly by
-    /// .github/workflows/web.yml), so a new visitor (or a first launch) needn't fetch all of
-    /// Encore page by page.
+    /// The copy of the whole catalogue published with the web version (refreshed daily by
+    /// .github/workflows/pages.yml), so a new visitor needn't fetch all of Encore page by page.
+    #[cfg(target_arch = "wasm32")]
     pub async fn snapshot() -> Result<Self> {
-        #[cfg(target_arch = "wasm32")]
-        let url = crate::web::page_url("catalogue.json");
-        #[cfg(not(target_arch = "wasm32"))]
-        let url = format!("{}catalogue.json", crate::links::WEB_APP);
         let http = crate::net::Http::new(None);
-        let cat: Self = http.get(&url).send().await?.error_for_status()?.json().await?;
+        let cat: Self = http.get(&crate::web::page_url("catalogue.json")).send().await?.error_for_status()?.json().await?;
         anyhow::ensure!(cat.version == VERSION && cat.complete, "the published catalogue is out of date");
         Ok(cat)
     }
