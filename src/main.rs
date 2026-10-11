@@ -74,6 +74,8 @@ const MAX_LOG: usize = 500;
 const BULK: usize = 50;
 /// While the catalogue is incomplete, ask Encore directly once typing pauses this long.
 const LIVE_SEARCH_DEBOUNCE: Duration = Duration::from_millis(350);
+/// The web version has no refresh button; it checks Encore for new charts this often instead.
+const AUTO_REFRESH: Duration = Duration::from_secs(30 * 60);
 const LOGO_PNG: &[u8] = include_bytes!("../assets/icon-256.png");
 const RENZORA_PNG: &[u8] = include_bytes!("../assets/renzora.png");
 const RENZORA_URL: &str = "https://github.com/renzora";
@@ -364,6 +366,8 @@ struct App {
     cat_total: Option<u64>,
     cat_status: CatStatus,
     cat_stop: Arc<AtomicBool>,
+    /// When the web version last checked for new charts by itself.
+    auto_refreshed: Instant,
 
     live_sent: String,
     live_edited: Instant,
@@ -505,6 +509,7 @@ impl App {
             cat_total: None,
             cat_status: CatStatus::Idle,
             cat_stop: Arc::new(AtomicBool::new(false)),
+            auto_refreshed: Instant::now(),
             live_sent: String::new(),
             live_edited: Instant::now(),
             live_searching: false,
@@ -553,6 +558,8 @@ impl App {
                 app.replace_charts(cat.charts);
                 // Only ask Encore for new charts if the catalogue is old enough (or unfinished).
                 let stale = match app.settings.refresh_after_hours {
+                    // The web version always checks, at most every half hour (see auto_refresh).
+                    _ if cfg!(target_arch = "wasm32") => now().saturating_sub(app.cat_updated) >= AUTO_REFRESH.as_secs(),
                     Some(h) => now().saturating_sub(app.cat_updated) >= h as u64 * 3600,
                     None => false,
                 };
@@ -718,6 +725,19 @@ impl App {
         });
     }
 
+    /// The web version checks Encore for new charts every half hour while it's open (in place of
+    /// the desktop's refresh button), and tries again that long after a failure.
+    fn auto_refresh(&mut self, ctx: &egui::Context) {
+        if !cfg!(target_arch = "wasm32") || matches!(self.cat_status, CatStatus::Building { .. }) {
+            return;
+        }
+        if self.auto_refreshed.elapsed() >= AUTO_REFRESH && now().saturating_sub(self.cat_updated) >= AUTO_REFRESH.as_secs() {
+            self.auto_refreshed = Instant::now();
+            self.update_catalogue(false);
+        }
+        ctx.request_repaint_after(Duration::from_secs(60));
+    }
+
     /// Fetches new charts (or continues/starts a full download of the catalogue).
     fn update_catalogue(&mut self, from_scratch: bool) {
         let mut cat = if from_scratch {
@@ -799,7 +819,7 @@ impl App {
         if press(Modifiers::COMMAND, Key::L) {
             self.show_log = !self.show_log;
         }
-        if press(Modifiers::NONE, Key::F5) && !matches!(self.cat_status, CatStatus::Building { .. }) {
+        if !cfg!(target_arch = "wasm32") && press(Modifiers::NONE, Key::F5) && !matches!(self.cat_status, CatStatus::Building { .. }) {
             self.update_catalogue(false);
         }
         if press(Modifiers::COMMAND, Key::D) && self.job.is_none() && !self.selected.is_empty() {
@@ -1999,7 +2019,8 @@ impl App {
                         }
                         CatStatus::Failed(e) => {
                             ui.colored_label(theme::bad(), t("⚠ Catalogue update failed")).on_hover_text(e.clone());
-                            if ui.small_button(t("Retry")).clicked() {
+                            // (The web version tries again by itself; see auto_refresh.)
+                            if !cfg!(target_arch = "wasm32") && ui.small_button(t("Retry")).clicked() {
                                 self.update_catalogue(false);
                             }
                         }
@@ -2009,7 +2030,7 @@ impl App {
                             if level < 2 {
                                 ui.weak(tr!("updated {when}", when = ago(self.cat_updated)));
                             }
-                            if ui.small_button("⟳").on_hover_text(t("Check Encore for new charts")).clicked() {
+                            if !cfg!(target_arch = "wasm32") && ui.small_button("⟳").on_hover_text(t("Check Encore for new charts")).clicked() {
                                 self.update_catalogue(false);
                             }
                         }
@@ -4884,6 +4905,7 @@ impl eframe::App for App {
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.handle_messages(ui.ctx());
+        self.auto_refresh(ui.ctx());
         self.covers.poll();
         self.auto_unzip(false);
         let ctx = ui.ctx().clone();
